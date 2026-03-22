@@ -15,7 +15,8 @@
   ```
 
 - **Compose 分包（GitHub Releases）**  
-  [最新 Release](https://github.com/Dominik2077w/ooeoeo/releases/latest) — 下载 zip 后解压，按目录内 `.env.example` 配置并启动。
+  [最新 Release](https://github.com/Dominik2077w/ooeoeo/releases/latest) — 下载 **`ooeoeo-engine-compose-bundles.zip`** 与同目录下的 **`SHA256SUMS`**，在 zip 旁执行 `shasum -a 256 -c SHA256SUMS` 校验后解压；按子目录内 `.env.example` 配置并启动。  
+  *若 Releases 尚为空，请稍后刷新；维护者发布步骤见私有源码仓内 `docs/MANUAL_RELEASE_LANDING.md`。*
 
 - **部署与密钥说明**  
   用户文档随 Release 或官网更新；技术要点：`.env` 中配置 `OOOEOEO_HTTP_BASE_URL`、`OOOEOEO_PLATFORM_API_KEY`（mesh-bootstrap），详见分包内说明或官网「边缘引擎」页面（上线后在此替换为真实链接）。
