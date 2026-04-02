@@ -1,35 +1,62 @@
-# ooeoeo — 产品与边缘引擎分发
+# oÖÖo
 
-本仓库为 **公开门面仓**：产品介绍、外链与 **GitHub Releases** 上的引擎分发物（如 Compose 分包 zip）。**不包含** ooeoeo 业务源码（云端、客户端、引擎实现等均在私有源码仓）。
+**实时同声传译平台** — 共享一份数据流，凝聚闲置设备的算力，让同传不再昂贵。
 
-## 边缘引擎（Whisper / NLLB + Mesh Worker）
+## 为什么
 
-- **容器镜像（GHCR，公开拉取）**  
-  前缀：`ghcr.io/dominik2077w/ooeoeo-engine`  
+同一间教室里坐着五个中国学生，都听不太懂老师在说什么，都需要同声传译。但我们听的是同一个老师、同一段话 — 却要付五份订阅费，世界要跑五份算力。与此同时，我们每个人家里都有一台电脑，正在闲着。
 
-  示例（将 `<model_id>` 换成你需要的模型 id，见 Release 说明或官网模型表）：
+这不合理。所以我做了 oÖÖo。
 
-  ```bash
-  docker pull ghcr.io/dominik2077w/ooeoeo-engine/whisper-runtime:<model_id>
-  docker pull ghcr.io/dominik2077w/ooeoeo-engine/mesh-worker:<model_id>
-  ```
+## 三档位
 
-- **Compose 分包（GitHub Releases）**  
-  [最新 Release](https://github.com/Dominik2077w/ooeoeo/releases/latest) — 下载 **`ooeoeo-engine-compose-bundles.zip`** 与同目录下的 **`SHA256SUMS`**，在 zip 旁执行 `shasum -a 256 -c SHA256SUMS` 校验后解压；按子目录内 `.env.example` 配置并启动。  
-  *若 Releases 尚为空，请稍后刷新；维护者发布步骤见私有源码仓内 `docs/MANUAL_RELEASE_LANDING.md`。*
+| 档位 | 说明 |
+|------|------|
+| **Solo** | 自备 AssemblyAI + Google Cloud 密钥，在设备上完成实时转录与翻译。密钥留在本地。 |
+| **Collaboration** | 在 Solo 基础上创建房间，同学扫码加入。房主持密钥转录，字幕实时广播给所有人。密钥不上传云端。 |
+| **Platform** | 在 Collaboration 基础上，接入自己的设备作为推理引擎。直播中可随时切换转录和翻译的算力来源。 |
 
-- **部署与密钥说明**  
-  用户文档随 Release 或官网更新；技术要点：`.env` 中配置 `OOOEOEO_HTTP_BASE_URL`、`OOOEOEO_PLATFORM_API_KEY`（mesh-bootstrap），详见分包内说明或官网「边缘引擎」页面（上线后在此替换为真实链接）。
+## 下载
+
+所有安装包托管于 [GitHub Releases](https://github.com/Dominik2077w/ooeoeo/releases)。
+
+**客户端**
+
+| 平台 | 状态 |
+|------|------|
+| iOS | 可用 |
+| macOS | 即将推出 |
+| Windows | 即将推出 |
+| Android | 即将推出 |
+| 鸿蒙 | 即将推出 |
+
+**桌面端 Engine**（将闲置设备变为推理引擎）
+
+| 平台 | 状态 |
+|------|------|
+| Windows (CPU / CUDA / Vulkan) | 即将推出 |
+| macOS (Metal / CPU) | 即将推出 |
+
+## Docker 镜像
+
+云端服务镜像托管于 GitHub Container Registry：
+
+```bash
+docker pull ghcr.io/dominik2077w/ooeoeo-cloud/cloud_v1:latest
+docker pull ghcr.io/dominik2077w/ooeoeo-cloud/website:latest
+```
+
+## 开源组件
+
+- [**meshcore**](https://github.com/Dominik2077w/meshcore) — 嵌入式 Go 任务调度引擎，即将开源
 
 ## 链接
 
 | 说明 | 地址 |
 |------|------|
-| 本仓库 Releases | https://github.com/Dominik2077w/ooeoeo/releases |
-| 私有源码仓（无访问权限则不可见） | `Dominik2077w/ooeoeo-src` |
-| 官网 | *（上线后补充）* |
+| Releases | [github.com/Dominik2077w/ooeoeo/releases](https://github.com/Dominik2077w/ooeoeo/releases) |
+| 问题反馈 | [github.com/Dominik2077w/ooeoeo/issues](https://github.com/Dominik2077w/ooeoeo/issues) |
 
-## 说明
+---
 
-- 镜像与分包的 **版本**、校验和（`SHA256SUMS`）、`manifest.json` 随正式发版流程发布（见内部计划）。  
-- 若你仅需本地/内网使用，可在具备权限的环境中从源码仓或内部 registry 获取构建说明。
+*oÖÖo 诞生于一间德国大学的教室。*
