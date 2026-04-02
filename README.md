@@ -37,15 +37,6 @@
 | Windows (CPU / CUDA / Vulkan) | 即将推出 |
 | macOS (Metal / CPU) | 即将推出 |
 
-## Docker 镜像
-
-云端服务镜像托管于 GitHub Container Registry：
-
-```bash
-docker pull ghcr.io/dominik2077w/ooeoeo-cloud/cloud_v1:latest
-docker pull ghcr.io/dominik2077w/ooeoeo-cloud/website:latest
-```
-
 ## 开源组件
 
 - [**meshcore**](https://github.com/Dominik2077w/meshcore) — 嵌入式 Go 任务调度引擎，即将开源
