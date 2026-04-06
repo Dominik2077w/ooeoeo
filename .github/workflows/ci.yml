@@ -1,0 +1,64 @@
+# CI 质量门：meshcore + cloud_v1 构建、测试、静态检查
+# 源码从 Myjoy 私有仓库 checkout，不泄漏
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Myjoy Git ref"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [ci]
+
+env:
+  GO_VERSION: "1.25"
+  MYJOY_REPO: Dominik2077w/Myjoy
+
+jobs:
+  meshcore:
+    name: meshcore
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: meshcore
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: meshcore/go.sum
+
+      - run: go build ./...
+      - run: go test -race -timeout 60s ./...
+      - run: go vet ./...
+
+  cloud_v1:
+    name: cloud_v1
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ooeoeo/cloud_v1
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ooeoeo/cloud_v1/go.sum
+
+      - run: go build ./...
+      - run: go test -race -timeout 120s ./...
+      - run: go vet ./...

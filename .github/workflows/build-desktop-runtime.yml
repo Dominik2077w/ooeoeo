@@ -1,0 +1,328 @@
+# 构建桌面端 runtime 二进制
+# 产物：whisper-server + nllb-server + mesh-worker
+# 平台：Windows x64 (CPU/CUDA/Vulkan) + macOS Universal (Metal/CPU)
+# 源码从 Myjoy 私有仓库 checkout，不泄漏
+
+name: Build Desktop Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_cpp_ref:
+        description: "whisper.cpp Git ref (tag or commit)"
+        required: false
+        default: "v1.8.4"
+      upload_release:
+        description: "Upload artifacts to GitHub Release"
+        required: false
+        default: "false"
+        type: boolean
+      ref:
+        description: "Myjoy Git ref"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [build-runtime]
+
+env:
+  WHISPER_CPP_REF: ${{ github.event.inputs.whisper_cpp_ref || 'v1.8.4' }}
+  GO_VERSION: "1.25"
+  PYTHON_VERSION: "3.11"
+  MYJOY_REPO: Dominik2077w/Myjoy
+
+permissions:
+  contents: write
+
+jobs:
+  windows-whisper-cpu:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - name: Clone whisper.cpp
+        run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Build (CPU)
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+          cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path whisper-cpp/build -Include "whisper-server.exe","server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/whisper-server-cpu.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-whisper-cpu
+          path: artifacts/whisper-server-cpu.exe
+
+  windows-whisper-cuda:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.6.2"
+          method: "network"
+      - name: Clone whisper.cpp
+        run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Build (CUDA)
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=ON
+          cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path whisper-cpp/build -Include "whisper-server.exe","server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/whisper-server-cuda.exe
+          $cudaPath = $env:CUDA_PATH
+          if ($cudaPath) {
+            foreach ($p in @("cudart64_*.dll","cublas64_*.dll","cublasLt64_*.dll")) {
+              Get-ChildItem -Path "$cudaPath/bin" -Filter $p -EA SilentlyContinue | ForEach-Object { Copy-Item $_.FullName artifacts/ }
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-whisper-cuda
+          path: artifacts/
+
+  windows-whisper-vulkan:
+    runs-on: windows-latest
+    env:
+      VULKAN_SDK_VERSION: "1.4.304.1"
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = "$env:TEMP\VulkanSDK-Installer.exe"
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/VulkanSDK-${{ env.VULKAN_SDK_VERSION }}-Installer.exe" -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
+          $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
+      - name: Clone whisper.cpp
+        run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Build (Vulkan)
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_VULKAN=ON
+          cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path whisper-cpp/build -Include "whisper-server.exe","server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/whisper-server-vulkan.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-whisper-vulkan
+          path: artifacts/whisper-server-vulkan.exe
+
+  windows-nllb-server:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r ooeoeo/client/platform/nllb-server/requirements.txt
+      - name: Build
+        working-directory: ooeoeo/client/platform/nllb-server
+        run: pyinstaller nllb_server.spec --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-nllb-server
+          path: ooeoeo/client/platform/nllb-server/dist/nllb-server.exe
+
+  windows-mesh-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: cd meshcore && go build -trimpath -ldflags="-s -w" -o mesh-worker.exe ./cmd/mesh-worker/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-mesh-worker
+          path: meshcore/mesh-worker.exe
+
+  macos-whisper:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - name: Clone whisper.cpp
+        run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Build arm64 (Metal)
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build-arm64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=ON
+          cmake --build whisper-cpp/build-arm64 --config Release --target whisper-server -j $(sysctl -n hw.ncpu)
+      - name: Build x86_64 (CPU)
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build-x86_64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF
+          cmake --build whisper-cpp/build-x86_64 --config Release --target whisper-server -j $(sysctl -n hw.ncpu)
+      - name: Universal Binary
+        run: |
+          mkdir -p artifacts
+          lipo -create whisper-cpp/build-arm64/bin/whisper-server whisper-cpp/build-x86_64/bin/whisper-server -output artifacts/whisper-server
+          chmod +x artifacts/whisper-server
+          metal_lib=$(find whisper-cpp/build-arm64 -name "*.metallib" -type f | head -1)
+          [ -n "$metal_lib" ] && cp "$metal_lib" artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-whisper
+          path: artifacts/
+
+  macos-nllb-server:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r ooeoeo/client/platform/nllb-server/requirements.txt
+      - name: Build arm64
+        working-directory: ooeoeo/client/platform/nllb-server
+        run: |
+          pyinstaller nllb_server.spec --noconfirm
+          mv dist/nllb-server dist/nllb-server-arm64
+      - name: Build x86_64 via Rosetta
+        working-directory: ooeoeo/client/platform/nllb-server
+        continue-on-error: true
+        run: |
+          arch -x86_64 /usr/bin/python3 -m pip install -r requirements.txt --target .x86deps
+          PYTHONPATH=.x86deps arch -x86_64 /usr/bin/python3 -m PyInstaller nllb_server.spec --noconfirm --distpath dist-x86
+          mv dist-x86/nllb-server dist/nllb-server-x86_64
+      - name: Universal Binary
+        run: |
+          cd ooeoeo/client/platform/nllb-server/dist
+          if [ -f nllb-server-x86_64 ]; then
+            lipo -create nllb-server-arm64 nllb-server-x86_64 -output nllb-server
+          else
+            cp nllb-server-arm64 nllb-server
+          fi
+          chmod +x nllb-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-nllb-server
+          path: ooeoeo/client/platform/nllb-server/dist/nllb-server
+
+  macos-mesh-worker:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build Universal
+        run: |
+          cd meshcore
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o mesh-worker-arm64 ./cmd/mesh-worker/
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mesh-worker-x86_64 ./cmd/mesh-worker/
+          lipo -create mesh-worker-arm64 mesh-worker-x86_64 -output mesh-worker
+          rm mesh-worker-arm64 mesh-worker-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-mesh-worker
+          path: meshcore/mesh-worker
+
+  package:
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-nllb-server, windows-mesh-worker, macos-whisper, macos-nllb-server, macos-mesh-worker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+      - name: Package Windows runtime
+        run: |
+          mkdir -p windows-runtime
+          cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
+          cp all-artifacts/windows-whisper-cuda/* windows-runtime/
+          cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
+          cp all-artifacts/windows-nllb-server/nllb-server.exe windows-runtime/
+          cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
+          cd windows-runtime && zip -r ../runtime-windows-x64.zip .
+      - name: Package macOS runtime
+        run: |
+          mkdir -p macos-runtime
+          cp all-artifacts/macos-whisper/* macos-runtime/
+          cp all-artifacts/macos-nllb-server/nllb-server macos-runtime/
+          cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
+          chmod +x macos-runtime/*
+          cd macos-runtime && zip -r ../runtime-macos-universal.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-windows-x64
+          path: runtime-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-macos-universal
+          path: runtime-macos-universal.zip
+
+  release:
+    needs: [package]
+    if: github.event.inputs.upload_release == 'true' || github.event.client_payload.upload_release == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.client_payload.tag || 'desktop-runtime' }}"
+          gh release create "$TAG" \
+            --repo ${{ github.repository }} \
+            --title "Desktop Runtime $TAG" \
+            --notes "Runtime update packages for desktop engine auto-update." \
+            release-artifacts/runtime-windows-x64/runtime-windows-x64.zip \
+            release-artifacts/runtime-macos-universal/runtime-macos-universal.zip
