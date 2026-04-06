@@ -314,6 +314,7 @@ jobs:
           [ -f "$SHA_WIN" ] && ASSETS="$ASSETS $SHA_WIN"
 
           gh release create "v${VERSION}" \
+            --repo ${{ github.repository }} \
             --title "v${VERSION}" \
             --notes "$(cat <<EOF
           ## Downloads
