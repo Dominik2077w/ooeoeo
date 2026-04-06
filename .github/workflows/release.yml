@@ -309,9 +309,11 @@ jobs:
           [ -f "$SHA_MAC" ] && ASSETS="$ASSETS $SHA_MAC"
           [ -f "$SHA_WIN" ] && ASSETS="$ASSETS $SHA_WIN"
 
+          # --clobber: 如果 release 已存在则覆盖
           gh release create "v${VERSION}" \
             --repo ${{ github.repository }} \
             --title "v${VERSION}" \
+            --clobber \
             --notes "$(cat <<EOF
           ## Downloads
 
@@ -326,8 +328,9 @@ jobs:
           )" \
             $ASSETS
 
-      # 同步版本信息到 cloud_v1
+      # 同步版本信息到 cloud_v1（失败不阻塞 Release）
       - name: Sync version to cloud_v1
+        continue-on-error: true
         env:
           CLOUD_ADMIN_EMAIL: ${{ secrets.CLOUD_ADMIN_EMAIL }}
           CLOUD_ADMIN_PASSWORD: ${{ secrets.CLOUD_ADMIN_PASSWORD }}
@@ -347,7 +350,7 @@ jobs:
             exit 0
           fi
 
-          LOGIN_RESP=$(curl -sf -X POST "${CLOUD_API_BASE}/auth/login" \
+          LOGIN_RESP=$(curl -s -X POST "${CLOUD_API_BASE}/auth/login" \
             -H "Content-Type: application/json" \
             -d "{\"email\": \"${CLOUD_ADMIN_EMAIL}\", \"password\": \"${CLOUD_ADMIN_PASSWORD}\"}")
 
