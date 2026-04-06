@@ -25,6 +25,9 @@ on:
   repository_dispatch:
     types: [release-desktop]
 
+permissions:
+  contents: write
+
 env:
   MYJOY_REPO: Dominik2077w/Myjoy
 
