@@ -61,19 +61,22 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Run tests
         working-directory: ooeoeo/client/platform/desktop-windows
         run: dotnet test OoeoeoEngine.Tests/OoeoeoEngine.Tests.csproj -c Release --verbosity normal
 
-      - name: Publish
+      - name: Restore
         working-directory: ooeoeo/client/platform/desktop-windows
+        run: dotnet restore OoeoeoEngine/OoeoeoEngine.csproj -r win-x64
+
+      - name: Publish (MSBuild)
+        working-directory: ooeoeo/client/platform/desktop-windows
+        shell: cmd
         run: |
-          dotnet publish OoeoeoEngine/OoeoeoEngine.csproj `
-            -c Release -r win-x64 --self-contained `
-            -p:Platform=x64 `
-            -p:Version=${{ steps.version.outputs.version }} `
-            -p:DisableTray=true `
-            -o app-dist
+          msbuild OoeoeoEngine\OoeoeoEngine.csproj /restore /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishDir=..\app-dist\ /p:Version=${{ steps.version.outputs.version }} /p:DisableTray=true /p:PublishReadyToRun=false
 
       # 下载 runtime（从本仓库已有的 desktop/* release）
       - name: Download runtime
