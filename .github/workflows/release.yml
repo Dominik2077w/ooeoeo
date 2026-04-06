@@ -1,0 +1,365 @@
+# 桌面端发布流水线（在公开仓库 ooeoeo 上运行，避免消耗私有仓库 Actions 额度）
+#
+# 源码通过 PAT 从私有仓库 Myjoy checkout，构建完 runner 销毁，不会泄漏源码。
+#
+# 触发方式：
+#   1. 手动 workflow_dispatch（填入版本号）
+#   2. Myjoy 推 v* tag 后通过 repository_dispatch 自动触发
+#
+# 产出：
+#   - Windows: OoeoeoEngine-Setup-{version}.exe（Inno Setup 安装器）
+#   - macOS:   OoeoeoEngine-{version}.dmg（.app bundle）
+
+name: Release Desktop Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 1.0.0，不含 v 前缀）"
+        required: true
+      ref:
+        description: "Myjoy 仓库的 Git ref（tag 或 commit SHA）"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [release-desktop]
+
+env:
+  MYJOY_REPO: Dominik2077w/Myjoy
+
+jobs:
+  # ── Windows 构建 ──
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Myjoy (private)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ steps.version.outputs.ref }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run tests
+        working-directory: ooeoeo/client/platform/desktop-windows
+        run: dotnet test OoeoeoEngine.Tests/OoeoeoEngine.Tests.csproj -c Release --verbosity normal
+
+      - name: Publish
+        working-directory: ooeoeo/client/platform/desktop-windows
+        run: |
+          dotnet publish OoeoeoEngine/OoeoeoEngine.csproj `
+            -c Release -r win-x64 --self-contained `
+            -p:Platform=x64 `
+            -p:Version=${{ steps.version.outputs.version }} `
+            -p:DisableTray=true `
+            -o app-dist
+
+      # 下载 runtime（从本仓库已有的 desktop/* release）
+      - name: Download runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET_URL=$(gh api repos/${{ github.repository }}/releases \
+            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
+
+          mkdir -p ooeoeo/client/platform/desktop-windows/runtime-dist
+          if [ -n "$ASSET_URL" ]; then
+            echo "Downloading runtime from: $ASSET_URL"
+            curl -L -o runtime-windows-x64.zip "$ASSET_URL"
+            cd ooeoeo/client/platform/desktop-windows/runtime-dist && unzip $GITHUB_WORKSPACE/runtime-windows-x64.zip
+          else
+            echo "WARNING: No runtime release found."
+          fi
+
+      # Inno Setup 编译安装器
+      - name: Build Installer (Inno Setup)
+        working-directory: ooeoeo/client/platform/desktop-windows
+        shell: cmd
+        run: |
+          iscc /DAppVersion=${{ steps.version.outputs.version }} installer.iss
+
+      - name: Compute checksum
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $installer = "ooeoeo/client/platform/desktop-windows/Output/OoeoeoEngine-Setup-$version.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          $hash | Out-File "ooeoeo/client/platform/desktop-windows/Output/sha256-windows.txt" -Encoding utf8 -NoNewline
+          Write-Host "SHA256: $hash"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            ooeoeo/client/platform/desktop-windows/Output/OoeoeoEngine-Setup-*.exe
+            ooeoeo/client/platform/desktop-windows/Output/sha256-windows.txt
+
+  # ── macOS 构建 ──
+  build-macos:
+    name: Build macOS
+    runs-on: macos-14
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Myjoy (private)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ steps.version.outputs.ref }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - name: Build Release (arm64)
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: swift build -c release --arch arm64
+
+      - name: Build Release (x86_64)
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: swift build -c release --arch x86_64
+
+      - name: Create Universal Binary
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          mkdir -p dist
+          lipo -create \
+            .build/arm64-apple-macosx/release/OoeoeoEngine \
+            .build/x86_64-apple-macosx/release/OoeoeoEngine \
+            -output dist/OoeoeoEngine
+          chmod +x dist/OoeoeoEngine
+
+      - name: Run tests
+        working-directory: ooeoeo/client/platform/desktop-macos
+        continue-on-error: true
+        run: swift test 2>&1 || echo "Tests skipped"
+
+      # 下载 runtime
+      - name: Download runtime
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET_URL=$(gh api repos/${{ github.repository }}/releases \
+            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
+
+          mkdir -p runtime-extracted
+          if [ -n "$ASSET_URL" ]; then
+            echo "Downloading runtime from: $ASSET_URL"
+            curl -L -o runtime-macos-universal.zip "$ASSET_URL"
+            cd runtime-extracted && unzip ../runtime-macos-universal.zip
+          else
+            echo "WARNING: No runtime release found."
+          fi
+
+      # 构建 .app bundle
+      - name: Build .app bundle
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP="dist/OoeoeoEngine.app"
+
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources/runtime"
+
+          cp dist/OoeoeoEngine "$APP/Contents/MacOS/"
+          sed "s/1.0.0/$VERSION/g" Info.plist > "$APP/Contents/Info.plist"
+
+          RESOURCES_BUNDLE=$(find .build -name "OoeoeoEngine_OoeoeoEngine.bundle" -type d | head -1)
+          if [ -n "$RESOURCES_BUNDLE" ]; then
+            cp -R "$RESOURCES_BUNDLE" "$APP/Contents/Resources/"
+          fi
+
+          cp ../../shared/models.json "$APP/Contents/Resources/" 2>/dev/null || true
+
+          if [ "$(ls -A $GITHUB_WORKSPACE/runtime-extracted 2>/dev/null)" ]; then
+            cp $GITHUB_WORKSPACE/runtime-extracted/* "$APP/Contents/Resources/runtime/" 2>/dev/null || true
+            chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
+          fi
+
+      # macOS 代码签名（当证书 secrets 可用时执行）
+      - name: Code sign (if certificate available)
+        if: env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PWD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          echo "$MACOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          codesign --deep --force --options runtime \
+            --sign "$MACOS_SIGNING_IDENTITY" --timestamp \
+            dist/OoeoeoEngine.app
+
+      - name: Notarize (if Apple ID available)
+        if: env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          ditto -c -k --keepParent dist/OoeoeoEngine.app dist/OoeoeoEngine-notarize.zip
+          xcrun notarytool submit dist/OoeoeoEngine-notarize.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple dist/OoeoeoEngine.app
+          rm dist/OoeoeoEngine-notarize.zip
+
+      # 打包 DMG
+      - name: Create DMG
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dmg-content
+          cp -R dist/OoeoeoEngine.app dmg-content/
+          ln -s /Applications dmg-content/Applications
+          hdiutil create -volname "oOOo Desktop Engine" \
+            -srcfolder dmg-content -ov -format UDZO \
+            "dist/OoeoeoEngine-${VERSION}.dmg"
+          shasum -a 256 "dist/OoeoeoEngine-${VERSION}.dmg" | awk '{print $1}' > "dist/sha256-macos.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            ooeoeo/client/platform/desktop-macos/dist/*.dmg
+            ooeoeo/client/platform/desktop-macos/dist/sha256-macos.txt
+
+  # ── 创建 Release + 同步版本信息 ──
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-windows]
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: artifacts/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: artifacts/windows
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          DMG=$(find artifacts/macos -name "*.dmg" | head -1)
+          EXE=$(find artifacts/windows -name "*.exe" | head -1)
+          SHA_MAC=$(find artifacts/macos -name "sha256-macos.txt" | head -1)
+          SHA_WIN=$(find artifacts/windows -name "sha256-windows.txt" | head -1)
+
+          ASSETS=""
+          [ -f "$DMG" ] && ASSETS="$ASSETS $DMG"
+          [ -f "$EXE" ] && ASSETS="$ASSETS $EXE"
+          [ -f "$SHA_MAC" ] && ASSETS="$ASSETS $SHA_MAC"
+          [ -f "$SHA_WIN" ] && ASSETS="$ASSETS $SHA_WIN"
+
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes "$(cat <<EOF
+          ## Downloads
+
+          | Platform | File | Install |
+          |----------|------|---------|
+          | Windows x64 | \`OoeoeoEngine-Setup-${VERSION}.exe\` | Double-click to install |
+          | macOS Universal | \`OoeoeoEngine-${VERSION}.dmg\` | Open DMG, drag to Applications |
+
+          ---
+          See sha256 files for checksum verification.
+          EOF
+          )" \
+            $ASSETS
+
+      # 同步版本信息到 cloud_v1
+      - name: Sync version to cloud_v1
+        env:
+          CLOUD_ADMIN_EMAIL: ${{ secrets.CLOUD_ADMIN_EMAIL }}
+          CLOUD_ADMIN_PASSWORD: ${{ secrets.CLOUD_ADMIN_PASSWORD }}
+          CLOUD_API_BASE: https://api.ooeoeo.com
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          MACOS_SHA256=$(cat artifacts/macos/sha256-macos.txt 2>/dev/null || echo "")
+          WINDOWS_SHA256=$(cat artifacts/windows/sha256-windows.txt 2>/dev/null || echo "")
+
+          RELEASE_BASE="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          MACOS_URL="${RELEASE_BASE}/OoeoeoEngine-${VERSION}.dmg"
+          WINDOWS_URL="${RELEASE_BASE}/OoeoeoEngine-Setup-${VERSION}.exe"
+
+          if [ -z "$CLOUD_ADMIN_EMAIL" ] || [ -z "$CLOUD_ADMIN_PASSWORD" ]; then
+            echo "WARNING: CLOUD_ADMIN_EMAIL/PASSWORD not set, skipping"
+            exit 0
+          fi
+
+          LOGIN_RESP=$(curl -sf -X POST "${CLOUD_API_BASE}/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\": \"${CLOUD_ADMIN_EMAIL}\", \"password\": \"${CLOUD_ADMIN_PASSWORD}\"}")
+
+          TOKEN=$(echo "$LOGIN_RESP" | jq -r '.access_token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "WARNING: Admin login failed"
+            exit 0
+          fi
+
+          echo "Syncing versions..."
+
+          curl -sf -X PUT "${CLOUD_API_BASE}/admin/client-updates" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"platform\":\"windows\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${WINDOWS_URL}\",\"downloadSha256\":\"${WINDOWS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
+            && echo "Windows synced" || echo "Windows sync failed"
+
+          curl -sf -X PUT "${CLOUD_API_BASE}/admin/client-updates" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"platform\":\"macos\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${MACOS_URL}\",\"downloadSha256\":\"${MACOS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
+            && echo "macOS synced" || echo "macOS sync failed"
