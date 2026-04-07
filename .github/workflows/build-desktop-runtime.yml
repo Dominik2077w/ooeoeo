@@ -194,11 +194,11 @@ jobs:
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
       - name: Build arm64 (Metal)
         run: |
-          cmake -S whisper-cpp -B whisper-cpp/build-arm64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=ON
+          cmake -S whisper-cpp -B whisper-cpp/build-arm64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=ON
           cmake --build whisper-cpp/build-arm64 --config Release --target whisper-server -j $(sysctl -n hw.ncpu)
       - name: Build x86_64 (CPU)
         run: |
-          cmake -S whisper-cpp -B whisper-cpp/build-x86_64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF
+          cmake -S whisper-cpp -B whisper-cpp/build-x86_64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF
           cmake --build whisper-cpp/build-x86_64 --config Release --target whisper-server -j $(sysctl -n hw.ncpu)
       - name: Universal Binary
         run: |
