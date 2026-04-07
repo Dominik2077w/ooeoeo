@@ -165,73 +165,57 @@ jobs:
           ref: ${{ steps.version.outputs.ref }}
           token: ${{ secrets.MYJOY_PAT }}
 
-      - name: Build Release (arm64)
+      # xcodebuild archive 直接产出 universal .app（含资源、图标、本地化）
+      - name: Archive (Universal Binary)
         working-directory: ooeoeo/client/platform/desktop-macos
-        run: swift build -c release --arch arm64
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          xcodebuild archive \
+            -project OoeoeoEngine.xcodeproj \
+            -scheme OoeoeoEngine \
+            -archivePath build/OoeoeoEngine.xcarchive \
+            -configuration Release \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION=1 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_ALLOWED=NO
 
-      - name: Build Release (x86_64)
-        working-directory: ooeoeo/client/platform/desktop-macos
-        run: swift build -c release --arch x86_64
-
-      - name: Create Universal Binary
+      - name: Extract .app from archive
         working-directory: ooeoeo/client/platform/desktop-macos
         run: |
           mkdir -p dist
-          lipo -create \
-            .build/arm64-apple-macosx/release/OoeoeoEngine \
-            .build/x86_64-apple-macosx/release/OoeoeoEngine \
-            -output dist/OoeoeoEngine
-          chmod +x dist/OoeoeoEngine
+          cp -R build/OoeoeoEngine.xcarchive/Products/Applications/OoeoeoEngine.app dist/
 
       - name: Run tests
         working-directory: ooeoeo/client/platform/desktop-macos
         continue-on-error: true
-        run: swift test 2>&1 || echo "Tests skipped"
+        run: |
+          xcodebuild test \
+            -project OoeoeoEngine.xcodeproj \
+            -scheme OoeoeoEngine \
+            -configuration Debug 2>&1 || echo "Tests skipped"
 
-      # 下载 runtime
-      - name: Download runtime
+      # 下载 runtime 并注入 .app bundle
+      - name: Download and bundle runtime
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: ooeoeo/client/platform/desktop-macos
         run: |
+          APP="dist/OoeoeoEngine.app"
+          mkdir -p "$APP/Contents/Resources/runtime"
+
           ASSET_URL=$(gh api repos/${{ github.repository }}/releases \
             --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
 
-          mkdir -p runtime-extracted
           if [ -n "$ASSET_URL" ]; then
             echo "Downloading runtime from: $ASSET_URL"
-            curl -L -o runtime-macos-universal.zip "$ASSET_URL"
-            cd runtime-extracted && unzip ../runtime-macos-universal.zip
+            curl -L -o /tmp/runtime-macos-universal.zip "$ASSET_URL"
+            unzip -o /tmp/runtime-macos-universal.zip -d "$APP/Contents/Resources/runtime/"
+            chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
           else
             echo "WARNING: No runtime release found."
-          fi
-
-      # 构建 .app bundle
-      - name: Build .app bundle
-        working-directory: ooeoeo/client/platform/desktop-macos
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          APP="dist/OoeoeoEngine.app"
-
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources/runtime"
-
-          cp dist/OoeoeoEngine "$APP/Contents/MacOS/"
-          sed "s/1.0.0/$VERSION/g" Info.plist > "$APP/Contents/Info.plist"
-
-          # SPM Bundle.module 查找 Bundle.main.bundleURL（= .app/）下的资源 bundle
-          RESOURCES_BUNDLE=$(find .build -name "OoeoeoEngine_OoeoeoEngine.bundle" -type d | head -1)
-          if [ -n "$RESOURCES_BUNDLE" ]; then
-            cp -R "$RESOURCES_BUNDLE" "$APP/"
-          fi
-
-          # App icon（Info.plist CFBundleIconFile=AppIcon → Contents/Resources/AppIcon.icns）
-          cp Sources/OoeoeoEngine/Resources/AppIcon.icns "$APP/Contents/Resources/" 2>/dev/null || true
-
-          cp ../../shared/models.json "$APP/Contents/Resources/" 2>/dev/null || true
-
-          if [ "$(ls -A $GITHUB_WORKSPACE/runtime-extracted 2>/dev/null)" ]; then
-            cp $GITHUB_WORKSPACE/runtime-extracted/* "$APP/Contents/Resources/runtime/" 2>/dev/null || true
-            chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
           fi
 
       # macOS 代码签名（当证书 secrets 可用时执行）
