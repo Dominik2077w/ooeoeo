@@ -15,7 +15,7 @@ on:
       upload_release:
         description: "Upload artifacts to GitHub Release"
         required: false
-        default: "false"
+        default: "true"
         type: boolean
       ref:
         description: "Myjoy Git ref"
