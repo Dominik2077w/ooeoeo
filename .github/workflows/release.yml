@@ -218,10 +218,14 @@ jobs:
           cp dist/OoeoeoEngine "$APP/Contents/MacOS/"
           sed "s/1.0.0/$VERSION/g" Info.plist > "$APP/Contents/Info.plist"
 
+          # SPM Bundle.module 查找 Bundle.main.bundleURL（= .app/）下的资源 bundle
           RESOURCES_BUNDLE=$(find .build -name "OoeoeoEngine_OoeoeoEngine.bundle" -type d | head -1)
           if [ -n "$RESOURCES_BUNDLE" ]; then
-            cp -R "$RESOURCES_BUNDLE" "$APP/Contents/Resources/"
+            cp -R "$RESOURCES_BUNDLE" "$APP/"
           fi
+
+          # App icon（Info.plist CFBundleIconFile=AppIcon → Contents/Resources/AppIcon.icns）
+          cp Sources/OoeoeoEngine/Resources/AppIcon.icns "$APP/Contents/Resources/" 2>/dev/null || true
 
           cp ../../shared/models.json "$APP/Contents/Resources/" 2>/dev/null || true
 
