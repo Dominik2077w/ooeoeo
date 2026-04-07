@@ -25,6 +25,7 @@ env:
   IMAGE_PREFIX: dominik2077w/ooeoeo-cloud
   MYJOY_REPO: Dominik2077w/Myjoy
 
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 permissions:
   contents: write
   packages: write
