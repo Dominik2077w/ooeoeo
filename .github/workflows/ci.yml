@@ -1,4 +1,4 @@
-# CI 质量门：meshcore + cloud_v1 构建、测试、静态检查
+# CI 质量门：meshcore + cloud_v1 + website 构建、测试、静态检查
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
 name: CI
 
@@ -15,8 +15,8 @@ on:
 env:
   GO_VERSION: "1.25"
   MYJOY_REPO: Dominik2077w/Myjoy
-
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   meshcore:
     name: meshcore
@@ -63,3 +63,50 @@ jobs:
       - run: go build ./...
       - run: go test -race -timeout 120s ./...
       - run: go vet ./...
+
+  website:
+    name: website
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ooeoeo/website
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ooeoeo/website/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  web-console:
+    name: web-console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ooeoeo/cloud_v1/web-console
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ooeoeo/cloud_v1/web-console/package-lock.json
+
+      - run: npm ci --legacy-peer-deps
+      - run: npm run build

@@ -1,5 +1,8 @@
 # 构建推送 Docker 镜像到 GHCR，然后自动部署到生产服务器
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
+#
+# 支持选择性构建：只改了 website 时可以只构建 website
+# 部署适配 scaling 双 compose 架构（gateway + node）
 name: Publish & Deploy Cloud
 
 on:
@@ -13,6 +16,10 @@ on:
         required: false
         default: "false"
         type: boolean
+      components:
+        description: "构建哪些组件（逗号分隔：cloud_v1,website,web-console 或 all）"
+        required: false
+        default: "all"
       ref:
         description: "Myjoy Git ref"
         required: false
@@ -24,27 +31,56 @@ env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: dominik2077w/ooeoeo-cloud
   MYJOY_REPO: Dominik2077w/Myjoy
-
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write
   packages: write
 
 jobs:
+  # ── 确定要构建哪些组件 ──
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag_override || github.event.client_payload.tag || '' }}"
+          if [ -z "$TAG" ]; then
+            TAG="dev-$(date +%Y%m%d)-${GITHUB_SHA::8}"
+          fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build matrix
+        id: matrix
+        run: |
+          COMPONENTS="${{ github.event.inputs.components || github.event.client_payload.components || 'all' }}"
+
+          ALL='[
+            {"image":"cloud_v1","context":".","dockerfile":"ooeoeo/cloud_v1/Dockerfile"},
+            {"image":"website","context":"ooeoeo/website","dockerfile":"ooeoeo/website/Dockerfile"},
+            {"image":"web-console","context":"ooeoeo/cloud_v1/web-console","dockerfile":"ooeoeo/cloud_v1/web-console/Dockerfile"}
+          ]'
+
+          if [ "$COMPONENTS" = "all" ]; then
+            echo "matrix={\"include\":$ALL}" >> "$GITHUB_OUTPUT"
+          else
+            # 从 all 中过滤出选中的组件
+            FILTERED=$(echo "$ALL" | jq -c --arg comp "$COMPONENTS" '
+              [.[] | select(.image as $img | ($comp | split(",") | map(gsub("\\s";"")) | any(. == $img)))]
+            ')
+            echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 构建并推送镜像 ──
   build-and-push:
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        include:
-          - image: cloud_v1
-            context: .
-            dockerfile: ooeoeo/cloud_v1/Dockerfile
-          - image: website
-            context: ooeoeo/website
-            dockerfile: ooeoeo/website/Dockerfile
-          - image: web-console
-            context: ooeoeo/cloud_v1/web-console
-            dockerfile: ooeoeo/cloud_v1/web-console/Dockerfile
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout Myjoy
         uses: actions/checkout@v4
@@ -52,15 +88,6 @@ jobs:
           repository: ${{ env.MYJOY_REPO }}
           ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.MYJOY_PAT }}
-
-      - name: Determine tag
-        id: tag
-        run: |
-          if [[ -n "${{ github.event.inputs.tag_override || github.event.client_payload.tag }}" ]]; then
-            echo "version=${{ github.event.inputs.tag_override || github.event.client_payload.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(date +%Y%m%d)-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-          fi
 
       - uses: docker/login-action@v3
         with:
@@ -76,27 +103,19 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ needs.prepare.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest
           build-args: |
-            OOOEOEO_BUILD_VERSION=${{ steps.tag.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            OOOEOEO_BUILD_VERSION=${{ needs.prepare.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
+  # ── 部署到生产服务器（scaling 架构）──
   deploy:
-    needs: build-and-push
+    needs: [prepare, build-and-push]
     runs-on: ubuntu-latest
     if: github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true
     steps:
-      - name: Determine version
-        id: tag
-        run: |
-          VERSION="${{ github.event.inputs.tag_override || github.event.client_payload.tag || '' }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="dev-$(date +%Y%m%d)-${GITHUB_SHA::8}"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -106,22 +125,37 @@ jobs:
           script_stop: true
           script: |
             set -euo pipefail
-            cd /opt/ooeoeo
+            cd /opt/ooeoeo/deploy/scaling
 
-            VERSION="${{ steps.tag.outputs.version }}"
+            VERSION="${{ needs.prepare.outputs.tag }}"
             echo "=== Deploying $VERSION ==="
 
+            # 保存旧版本用于回滚
             PREV_TAG=$(grep '^OOOEOEO_IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
-            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env
 
-            docker compose pull cloud_v1 website web_console
-            docker compose up -d --no-deps cloud_v1 website web_console
+            # 更新 gateway 和 node 的 .env 文件
+            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env .env.node
 
+            # === Gateway 组件（website + web-console + 基础设施）===
+            echo "--- Pulling gateway images ---"
+            docker compose -f docker-compose.gateway.yml pull website web-console
+
+            echo "--- Restarting gateway services ---"
+            docker compose -f docker-compose.gateway.yml up -d --no-deps website web-console
+
+            # === Node 组件（cloud_v1）===
+            echo "--- Pulling node images ---"
+            docker compose -f docker-compose.node.yml --env-file .env.node pull cloud_v1
+
+            echo "--- Restarting cloud_v1 ---"
+            docker compose -f docker-compose.node.yml --env-file .env.node up -d --no-deps cloud_v1
+
+            # === 健康检查 ===
             echo "=== Health check ==="
             OK=0
             for i in $(seq 1 12); do
               sleep 5
-              if docker compose exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
+              if docker compose -f docker-compose.node.yml --env-file .env.node exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
                 OK=1
                 break
               fi
@@ -130,11 +164,17 @@ jobs:
 
             if [ "$OK" -ne 1 ]; then
               echo "=== HEALTH CHECK FAILED — ROLLING BACK to $PREV_TAG ==="
-              sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$PREV_TAG/" .env
-              docker compose pull cloud_v1 website web_console
-              docker compose up -d --no-deps cloud_v1 website web_console
+              sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$PREV_TAG/" .env .env.node
+
+              docker compose -f docker-compose.gateway.yml pull website web-console
+              docker compose -f docker-compose.gateway.yml up -d --no-deps website web-console
+
+              docker compose -f docker-compose.node.yml --env-file .env.node pull cloud_v1
+              docker compose -f docker-compose.node.yml --env-file .env.node up -d --no-deps cloud_v1
+
               echo "=== Rollback complete ==="
               exit 1
             fi
 
             echo "=== Deploy $VERSION succeeded ==="
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'cloud_v1|website|web-console'
