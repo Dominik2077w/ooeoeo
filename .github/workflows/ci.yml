@@ -16,6 +16,7 @@ env:
   GO_VERSION: "1.25"
   MYJOY_REPO: Dominik2077w/Myjoy
 
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   meshcore:
     name: meshcore
