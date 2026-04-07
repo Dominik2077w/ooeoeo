@@ -30,6 +30,7 @@ env:
   PYTHON_VERSION: "3.11"
   MYJOY_REPO: Dominik2077w/Myjoy
 
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 permissions:
   contents: write
 
