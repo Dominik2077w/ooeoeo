@@ -320,10 +320,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.event.client_payload.tag || 'desktop-runtime' }}"
+          TAG="${{ github.event.inputs.tag || github.event.client_payload.tag || 'desktop/runtime' }}"
+          # 删除已存在的同名 release（重新构建时覆盖）
+          gh release delete "$TAG" --repo ${{ github.repository }} -y 2>/dev/null || true
+          git push --delete origin "refs/tags/$TAG" 2>/dev/null || true
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
             --title "Desktop Runtime $TAG" \
-            --notes "Runtime update packages for desktop engine auto-update." \
+            --notes "Runtime binaries (whisper-server, nllb-server, mesh-worker) for desktop engine." \
             release-artifacts/runtime-windows-x64/runtime-windows-x64.zip \
             release-artifacts/runtime-macos-universal/runtime-macos-universal.zip
