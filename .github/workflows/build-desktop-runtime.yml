@@ -2,6 +2,8 @@
 # 产物：whisper-server + nllb-server + mesh-worker
 # 平台：Windows x64 (CPU/CUDA/Vulkan) + macOS Universal (Metal/CPU)
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
+#
+# mesh_worker_only=true 时仅重编 mesh-worker（~30秒），其余从现有 release 复用
 
 name: Build Desktop Runtime
 
@@ -21,6 +23,11 @@ on:
         description: "Myjoy Git ref"
         required: false
         default: "main"
+      mesh_worker_only:
+        description: "仅重编 mesh-worker（跳过 whisper/nllb 构建）"
+        required: false
+        default: "false"
+        type: boolean
   repository_dispatch:
     types: [build-runtime]
 
@@ -36,6 +43,7 @@ permissions:
 
 jobs:
   windows-whisper-cpu:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout Myjoy
@@ -63,6 +71,7 @@ jobs:
           path: artifacts/whisper-server-cpu.exe
 
   windows-whisper-cuda:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout Myjoy
@@ -100,6 +109,7 @@ jobs:
           path: artifacts/
 
   windows-whisper-vulkan:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     env:
       VULKAN_SDK_VERSION: "1.4.304.1"
@@ -138,6 +148,7 @@ jobs:
           path: artifacts/whisper-server-vulkan.exe
 
   windows-nllb-server:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout Myjoy
@@ -182,6 +193,7 @@ jobs:
           path: meshcore/mesh-worker.exe
 
   macos-whisper:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: macos-14
     steps:
       - name: Checkout Myjoy
@@ -213,6 +225,7 @@ jobs:
           path: artifacts/
 
   macos-nllb-server:
+    if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: macos-14
     steps:
       - name: Checkout Myjoy
@@ -277,28 +290,67 @@ jobs:
 
   package:
     needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-nllb-server, windows-mesh-worker, macos-whisper, macos-nllb-server, macos-mesh-worker]
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MESH_WORKER_ONLY: ${{ github.event.inputs.mesh_worker_only }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: all-artifacts
+
+      # mesh_worker_only 模式：从现有 release 下载 whisper/nllb 二进制
+      - name: Download existing runtime (mesh-worker-only mode)
+        if: env.MESH_WORKER_ONLY == 'true'
+        run: |
+          # 下载现有 Windows runtime
+          WIN_URL=$(gh api repos/${{ github.repository }}/releases \
+            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
+          if [ -n "$WIN_URL" ]; then
+            echo "下载现有 Windows runtime..."
+            curl -L -o /tmp/existing-win.zip "$WIN_URL"
+            mkdir -p existing-win && cd existing-win && unzip /tmp/existing-win.zip && cd ..
+          fi
+
+          # 下载现有 macOS runtime
+          MAC_URL=$(gh api repos/${{ github.repository }}/releases \
+            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
+          if [ -n "$MAC_URL" ]; then
+            echo "下载现有 macOS runtime..."
+            curl -L -o /tmp/existing-mac.zip "$MAC_URL"
+            mkdir -p existing-mac && cd existing-mac && unzip /tmp/existing-mac.zip && cd ..
+          fi
+
       - name: Package Windows runtime
         run: |
           mkdir -p windows-runtime
-          cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
-          cp all-artifacts/windows-whisper-cuda/* windows-runtime/
-          cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
-          cp all-artifacts/windows-nllb-server/nllb-server.exe windows-runtime/
+          if [ "$MESH_WORKER_ONLY" = "true" ]; then
+            # 复用现有 whisper/nllb，只替换 mesh-worker
+            cp existing-win/* windows-runtime/ 2>/dev/null || true
+          else
+            cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
+            cp all-artifacts/windows-whisper-cuda/* windows-runtime/
+            cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
+            cp all-artifacts/windows-nllb-server/nllb-server.exe windows-runtime/
+          fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
           cd windows-runtime && zip -r ../runtime-windows-x64.zip .
+
       - name: Package macOS runtime
         run: |
           mkdir -p macos-runtime
-          cp all-artifacts/macos-whisper/* macos-runtime/
-          cp all-artifacts/macos-nllb-server/nllb-server macos-runtime/
+          if [ "$MESH_WORKER_ONLY" = "true" ]; then
+            # 复用现有 whisper/nllb，只替换 mesh-worker
+            cp existing-mac/* macos-runtime/ 2>/dev/null || true
+          else
+            cp all-artifacts/macos-whisper/* macos-runtime/
+            cp all-artifacts/macos-nllb-server/nllb-server macos-runtime/
+          fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
           chmod +x macos-runtime/*
           cd macos-runtime && zip -r ../runtime-macos-universal.zip .
+
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-windows-x64
@@ -310,7 +362,7 @@ jobs:
 
   release:
     needs: [package]
-    if: github.event.inputs.upload_release == 'true' || github.event.client_payload.upload_release == true
+    if: (github.event.inputs.upload_release == 'true' || github.event.client_payload.upload_release == true) && !cancelled() && needs.package.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
