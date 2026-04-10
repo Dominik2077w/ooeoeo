@@ -22,6 +22,15 @@ on:
         description: "Myjoy 仓库的 Git ref（tag 或 commit SHA）"
         required: false
         default: "main"
+      platforms:
+        description: "构建平台：all (默认) | macos | windows"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - macos
+          - windows
   repository_dispatch:
     types: [release-desktop]
 
@@ -37,6 +46,7 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
+    if: github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'windows' || github.event_name == 'repository_dispatch'
     steps:
       - name: Resolve version
         id: version
@@ -146,6 +156,7 @@ jobs:
   build-macos:
     name: Build macOS
     runs-on: macos-15
+    if: github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'macos' || github.event_name == 'repository_dispatch'
     steps:
       - name: Resolve version
         id: version
@@ -280,7 +291,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [build-macos, build-windows]
-    if: always() && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
+    if: always() && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') && needs.build-macos.result != 'failure' && needs.build-windows.result != 'failure'
     steps:
       - name: Resolve version
         id: version
@@ -364,26 +375,34 @@ jobs:
             exit 0
           fi
 
-          LOGIN_RESP=$(curl -s -X POST "${CLOUD_API_BASE}/auth/login" \
+          LOGIN_RESP=$(curl -s -X POST "${CLOUD_API_BASE}/v1/auth/login" \
             -H "Content-Type: application/json" \
             -d "{\"email\": \"${CLOUD_ADMIN_EMAIL}\", \"password\": \"${CLOUD_ADMIN_PASSWORD}\"}")
 
           TOKEN=$(echo "$LOGIN_RESP" | jq -r '.access_token // empty')
           if [ -z "$TOKEN" ]; then
-            echo "WARNING: Admin login failed"
+            echo "WARNING: Admin login failed: $LOGIN_RESP"
             exit 0
           fi
 
-          echo "Syncing versions..."
+          # 只同步本次实际构建的平台（artifacts 目录在前一 step 下载）
+          DMG=$(find artifacts/macos -name "*.dmg" 2>/dev/null | head -1)
+          EXE=$(find artifacts/windows -name "*.exe" 2>/dev/null | head -1)
 
-          curl -sf -X PUT "${CLOUD_API_BASE}/admin/client-updates" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"platform\":\"windows\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${WINDOWS_URL}\",\"downloadSha256\":\"${WINDOWS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
-            && echo "Windows synced" || echo "Windows sync failed"
+          echo "Syncing versions... DMG=$DMG EXE=$EXE"
 
-          curl -sf -X PUT "${CLOUD_API_BASE}/admin/client-updates" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"platform\":\"macos\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${MACOS_URL}\",\"downloadSha256\":\"${MACOS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
-            && echo "macOS synced" || echo "macOS sync failed"
+          if [ -f "$EXE" ]; then
+            curl -sf -X PUT "${CLOUD_API_BASE}/v1/admin/client-updates" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"platform\":\"windows\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${WINDOWS_URL}\",\"downloadSha256\":\"${WINDOWS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
+              && echo "Windows synced" || echo "Windows sync failed"
+          fi
+
+          if [ -f "$DMG" ]; then
+            curl -sf -X PUT "${CLOUD_API_BASE}/v1/admin/client-updates" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"platform\":\"macos\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${MACOS_URL}\",\"downloadSha256\":\"${MACOS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
+              && echo "macOS synced" || echo "macOS sync failed"
+          fi
