@@ -54,6 +54,11 @@ jobs:
           token: ${{ secrets.MYJOY_PAT }}
       - name: Clone whisper.cpp
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Apply whisper-server abort patch
+        shell: bash
+        run: |
+          cd whisper-cpp
+          git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (CPU)
         run: |
           cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
@@ -86,6 +91,11 @@ jobs:
           method: "network"
       - name: Clone whisper.cpp
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Apply whisper-server abort patch
+        shell: bash
+        run: |
+          cd whisper-cpp
+          git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (CUDA)
         run: |
           cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=ON
@@ -131,6 +141,11 @@ jobs:
           echo "$sdkPath\Bin" >> $env:GITHUB_PATH
       - name: Clone whisper.cpp
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Apply whisper-server abort patch
+        shell: bash
+        run: |
+          cd whisper-cpp
+          git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (Vulkan)
         run: |
           cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_VULKAN=ON
@@ -204,6 +219,11 @@ jobs:
           token: ${{ secrets.MYJOY_PAT }}
       - name: Clone whisper.cpp
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
+      - name: Apply whisper-server abort patch
+        shell: bash
+        run: |
+          cd whisper-cpp
+          git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build arm64 (Metal)
         run: |
           cmake -S whisper-cpp -B whisper-cpp/build-arm64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_METAL=ON
