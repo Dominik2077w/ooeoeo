@@ -255,10 +255,16 @@ jobs:
     runs-on: ubuntu-latest
     # 只在 cloud_v1 被构建时推 node;
     # 等 deploy-gateway 完成 (success 或 skipped 都可以),允许 components=cloud_v1 时跳过 gateway。
+    #
+    # !cancelled() 必须在 if 表达式开头:GitHub Actions 在 needs 含 skipped job 时
+    # 默认会让本 job 也 skipped,除非 if 显式包含 status check function
+    # (always() / !cancelled() / success() 等),否则 if 主体永远不会被求值。
     if: |
-      (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true)
+      !cancelled()
+      && (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true)
       && needs.prepare.outputs.should_deploy_node == 'true'
       && needs.prepare.outputs.node_matrix != '{"include":[]}'
+      && needs.build-and-push.result == 'success'
       && (needs.deploy-gateway.result == 'success' || needs.deploy-gateway.result == 'skipped')
     strategy:
       fail-fast: false
