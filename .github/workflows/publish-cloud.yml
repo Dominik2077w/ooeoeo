@@ -63,21 +63,21 @@ jobs:
         run: |
           COMPONENTS="${{ github.event.inputs.components || github.event.client_payload.components || 'all' }}"
 
-          ALL='[
-            {"image":"cloud_v1","context":".","dockerfile":"ooeoeo/cloud_v1/Dockerfile"},
-            {"image":"website","context":"ooeoeo/website","dockerfile":"ooeoeo/website/Dockerfile"},
-            {"image":"web-console","context":"ooeoeo/cloud_v1/web-console","dockerfile":"ooeoeo/cloud_v1/web-console/Dockerfile"}
-          ]'
+          # 用 jq -c 压缩成单行 — GITHUB_OUTPUT 不接受多行 value (除非用 heredoc 分隔符)
+          ALL=$(jq -nc '[
+            {image:"cloud_v1",  context:".",                            dockerfile:"ooeoeo/cloud_v1/Dockerfile"},
+            {image:"website",   context:"ooeoeo/website",               dockerfile:"ooeoeo/website/Dockerfile"},
+            {image:"web-console", context:"ooeoeo/cloud_v1/web-console", dockerfile:"ooeoeo/cloud_v1/web-console/Dockerfile"}
+          ]')
 
           if [ "$COMPONENTS" = "all" ]; then
-            echo "matrix={\"include\":$ALL}" >> "$GITHUB_OUTPUT"
+            FILTERED="$ALL"
           else
-            # 从 all 中过滤出选中的组件
-            FILTERED=$(echo "$ALL" | jq -c --arg comp "$COMPONENTS" '
-              [.[] | select(.image as $img | ($comp | split(",") | map(gsub("\\s";"")) | any(. == $img)))]
-            ')
-            echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
+            FILTERED=$(echo "$ALL" | jq -c --arg comp "$COMPONENTS" \
+              '[.[] | select(.image as $img | ($comp | split(",") | map(gsub("\\s";"")) | any(. == $img)))]')
           fi
+          MATRIX=$(jq -nc --argjson inc "$FILTERED" '{include:$inc}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
       # 根据本次 build 的 components 决定要 deploy 哪一组服务器:
       #   - gateway 上跑 website + web-console, 任一被构建就 deploy gateway
