@@ -38,12 +38,14 @@ permissions:
   packages: write
 
 jobs:
-  # ── 确定要构建哪些组件 ──
+  # ── 确定要构建哪些组件 + 解析部署 topology ──
   prepare:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.version }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      gateway_matrix: ${{ steps.topology.outputs.gateway_matrix }}
+      node_matrix: ${{ steps.topology.outputs.node_matrix }}
     steps:
       - name: Determine tag
         id: tag
@@ -74,6 +76,57 @@ jobs:
             ')
             echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
           fi
+
+      # ── 解析部署 topology（来自 GitHub vars）──
+      # vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 用同一格式:
+      #   "name=host,name=host,..."
+      # 例:
+      #   DEPLOY_GATEWAYS = "eu=138.199.205.71,us=1.2.3.4"
+      #   DEPLOY_NODES    = "eu-n1=178.104.129.69,eu-n2=178.104.129.70,us-n1=5.6.7.8"
+      # 加新节点 = 改 var 加一个条目, 不需改 workflow。
+      - name: Parse deploy topology
+        id: topology
+        env:
+          GATEWAYS_RAW: ${{ vars.DEPLOY_GATEWAYS }}
+          NODES_RAW: ${{ vars.DEPLOY_NODES }}
+        run: |
+          parse_hosts() {
+            local raw="$1"
+            if [ -z "$raw" ]; then
+              echo '{"include":[]}'
+              return
+            fi
+            echo "$raw" | jq -Rsc '
+              gsub("\\s"; "") | split(",") |
+              map(select(length > 0)) |
+              map(capture("^(?<name>[^=]+)=(?<host>.+)$")) |
+              {include: .}
+            '
+          }
+          GATEWAY_MATRIX=$(parse_hosts "$GATEWAYS_RAW")
+          NODE_MATRIX=$(parse_hosts "$NODES_RAW")
+          echo "gateway_matrix=$GATEWAY_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "node_matrix=$NODE_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Parsed gateways: $GATEWAY_MATRIX"
+          echo "Parsed nodes:    $NODE_MATRIX"
+
+      # 如果 deploy=true 但没配任何 host, 提前 fail 提醒用户配 vars
+      - name: Validate topology when deploy enabled
+        if: github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true
+        env:
+          GW: ${{ steps.topology.outputs.gateway_matrix }}
+          ND: ${{ steps.topology.outputs.node_matrix }}
+        run: |
+          GW_COUNT=$(echo "$GW" | jq '.include | length')
+          ND_COUNT=$(echo "$ND" | jq '.include | length')
+          if [ "$GW_COUNT" -eq 0 ] && [ "$ND_COUNT" -eq 0 ]; then
+            echo "ERROR: deploy=true 但 vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 都为空。"
+            echo "请在 repo Settings → Secrets and variables → Actions → Variables 配置:"
+            echo "  DEPLOY_GATEWAYS = 'eu=<gateway-ip>'"
+            echo "  DEPLOY_NODES    = 'eu-n1=<node-ip>'"
+            exit 1
+          fi
+          echo "Will deploy to $GW_COUNT gateway(s) and $ND_COUNT node(s)"
 
   # ── 构建并推送镜像 ──
   build-and-push:
@@ -110,52 +163,109 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-  # ── 部署到生产服务器（scaling 架构）──
-  deploy:
+  # ── 部署到生产服务器（scaling 多机架构,vars + matrix 动态展开）──
+  #
+  # 多机架构:
+  #   - Gateway 服务器: website + web-console + 基础设施
+  #     部署目录 /opt/ooeoeo/deploy/scaling/, compose 文件 docker-compose.gateway.yml
+  #   - Node 服务器: cloud_v1
+  #     部署目录 /opt/ooeoeo/deploy/scaling/, compose 文件 docker-compose.node.yml
+  #
+  # 通过 GitHub repo vars 动态声明所有目标 (加节点 = 改一行 var, 不改 workflow):
+  #
+  #   vars.DEPLOY_GATEWAYS = "eu=138.199.205.71"
+  #   vars.DEPLOY_NODES    = "eu-n1=178.104.129.69"
+  #
+  # 未来扩展示例:
+  #   vars.DEPLOY_GATEWAYS = "eu=138.199.205.71,us=1.2.3.4,ap=5.6.7.8"
+  #   vars.DEPLOY_NODES    = "eu-n1=178.104.129.69,eu-n2=178.104.129.70,us-n1=9.10.11.12"
+  #
+  # 必需 secrets (所有机器共用 SSH 凭据):
+  #   - DEPLOY_SSH_USER  全集群共用 SSH 用户 (例: root)
+  #   - DEPLOY_SSH_KEY   全集群共用 SSH 私钥
+  #
+  # 部署顺序: 所有 gateway 并行 → 所有 node 并行(node 等所有 gateway 完成)。
+  # 任一目标失败只回滚自己那一台 (fail-fast: false)。
+  deploy-gateway:
     needs: [prepare, build-and-push]
     runs-on: ubuntu-latest
-    if: github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true
+    if: (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true) && needs.prepare.outputs.gateway_matrix != '{"include":[]}'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.gateway_matrix) }}
     steps:
-      - name: Deploy via SSH
+      - name: Deploy gateway ${{ matrix.name }}
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          host: ${{ matrix.host }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script_stop: true
+          envs: VERSION,NAME
           script: |
             set -euo pipefail
             cd /opt/ooeoeo/deploy/scaling
 
             VERSION="${{ needs.prepare.outputs.tag }}"
-            echo "=== Deploying $VERSION ==="
+            NAME="${{ matrix.name }}"
+            echo "=== [GATEWAY $NAME] Deploying $VERSION ==="
 
-            # 保存旧版本用于回滚
             PREV_TAG=$(grep '^OOOEOEO_IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
+            echo "PREV_TAG=$PREV_TAG"
 
-            # 更新 gateway 和 node 的 .env 文件
-            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env .env.node
+            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env
 
-            # === Gateway 组件（website + web-console + 基础设施）===
             echo "--- Pulling gateway images ---"
             docker compose -f docker-compose.gateway.yml pull website web-console
 
             echo "--- Restarting gateway services ---"
             docker compose -f docker-compose.gateway.yml up -d --no-deps website web-console
 
-            # === Node 组件（cloud_v1）===
+            echo "=== [GATEWAY $NAME] Deploy $VERSION succeeded ==="
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'website|web-console' || true
+
+  deploy-node:
+    needs: [prepare, build-and-push, deploy-gateway]
+    runs-on: ubuntu-latest
+    # gateway 全部成功才推 node; 但允许 gateway_matrix 为空(纯 node 部署)。
+    if: |
+      (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true)
+      && needs.prepare.outputs.node_matrix != '{"include":[]}'
+      && (needs.deploy-gateway.result == 'success' || needs.deploy-gateway.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.node_matrix) }}
+    steps:
+      - name: Deploy node ${{ matrix.name }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ matrix.host }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: VERSION,NAME
+          script: |
+            set -euo pipefail
+            cd /opt/ooeoeo/deploy/scaling
+
+            VERSION="${{ needs.prepare.outputs.tag }}"
+            NAME="${{ matrix.name }}"
+            echo "=== [NODE $NAME] Deploying $VERSION ==="
+
+            PREV_TAG=$(grep '^OOOEOEO_IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
+            echo "PREV_TAG=$PREV_TAG"
+
+            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env
+
             echo "--- Pulling node images ---"
-            docker compose -f docker-compose.node.yml --env-file .env.node pull cloud_v1
+            docker compose -f docker-compose.node.yml pull cloud_v1
 
             echo "--- Restarting cloud_v1 ---"
-            docker compose -f docker-compose.node.yml --env-file .env.node up -d --no-deps cloud_v1
+            docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
 
-            # === 健康检查 ===
-            echo "=== Health check ==="
+            echo "=== [NODE $NAME] Health check ==="
             OK=0
             for i in $(seq 1 12); do
               sleep 5
-              if docker compose -f docker-compose.node.yml --env-file .env.node exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
+              if docker compose -f docker-compose.node.yml exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
                 OK=1
                 break
               fi
@@ -163,18 +273,13 @@ jobs:
             done
 
             if [ "$OK" -ne 1 ]; then
-              echo "=== HEALTH CHECK FAILED — ROLLING BACK to $PREV_TAG ==="
-              sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$PREV_TAG/" .env .env.node
-
-              docker compose -f docker-compose.gateway.yml pull website web-console
-              docker compose -f docker-compose.gateway.yml up -d --no-deps website web-console
-
-              docker compose -f docker-compose.node.yml --env-file .env.node pull cloud_v1
-              docker compose -f docker-compose.node.yml --env-file .env.node up -d --no-deps cloud_v1
-
-              echo "=== Rollback complete ==="
+              echo "=== [NODE $NAME] HEALTH CHECK FAILED — ROLLING BACK to $PREV_TAG ==="
+              sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$PREV_TAG/" .env
+              docker compose -f docker-compose.node.yml pull cloud_v1
+              docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
+              echo "=== [NODE $NAME] Rollback complete ==="
               exit 1
             fi
 
-            echo "=== Deploy $VERSION succeeded ==="
-            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'cloud_v1|website|web-console'
+            echo "=== [NODE $NAME] Deploy $VERSION succeeded ==="
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep cloud_v1 || true
