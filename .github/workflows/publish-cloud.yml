@@ -46,6 +46,8 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       gateway_matrix: ${{ steps.topology.outputs.gateway_matrix }}
       node_matrix: ${{ steps.topology.outputs.node_matrix }}
+      should_deploy_gateway: ${{ steps.deploy_targets.outputs.should_deploy_gateway }}
+      should_deploy_node: ${{ steps.deploy_targets.outputs.should_deploy_node }}
     steps:
       - name: Determine tag
         id: tag
@@ -76,6 +78,28 @@ jobs:
             ')
             echo "matrix={\"include\":$FILTERED}" >> "$GITHUB_OUTPUT"
           fi
+
+      # 根据本次 build 的 components 决定要 deploy 哪一组服务器:
+      #   - gateway 上跑 website + web-console, 任一被构建就 deploy gateway
+      #   - node 上跑 cloud_v1, cloud_v1 被构建就 deploy node
+      # 没被 build 的 image 在 GHCR 没有新 tag, 强行 pull 会失败。
+      - name: Determine deploy targets
+        id: deploy_targets
+        run: |
+          COMPONENTS="${{ github.event.inputs.components || github.event.client_payload.components || 'all' }}"
+          if [[ "$COMPONENTS" = "all" || "$COMPONENTS" =~ website || "$COMPONENTS" =~ web-console ]]; then
+            echo "should_deploy_gateway=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy_gateway=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$COMPONENTS" = "all" || "$COMPONENTS" =~ cloud_v1 ]]; then
+            echo "should_deploy_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy_node=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "components=$COMPONENTS"
+          echo "should_deploy_gateway=$(grep should_deploy_gateway "$GITHUB_OUTPUT" | tail -1)"
+          echo "should_deploy_node=$(grep should_deploy_node "$GITHUB_OUTPUT" | tail -1)"
 
       # ── 解析部署 topology（来自 GitHub vars）──
       # vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 用同一格式:
@@ -189,7 +213,10 @@ jobs:
   deploy-gateway:
     needs: [prepare, build-and-push]
     runs-on: ubuntu-latest
-    if: (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true) && needs.prepare.outputs.gateway_matrix != '{"include":[]}'
+    if: |
+      (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true)
+      && needs.prepare.outputs.should_deploy_gateway == 'true'
+      && needs.prepare.outputs.gateway_matrix != '{"include":[]}'
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.gateway_matrix) }}
@@ -226,9 +253,11 @@ jobs:
   deploy-node:
     needs: [prepare, build-and-push, deploy-gateway]
     runs-on: ubuntu-latest
-    # gateway 全部成功才推 node; 但允许 gateway_matrix 为空(纯 node 部署)。
+    # 只在 cloud_v1 被构建时推 node;
+    # 等 deploy-gateway 完成 (success 或 skipped 都可以),允许 components=cloud_v1 时跳过 gateway。
     if: |
       (github.event.inputs.deploy == 'true' || github.event.client_payload.deploy == true)
+      && needs.prepare.outputs.should_deploy_node == 'true'
       && needs.prepare.outputs.node_matrix != '{"include":[]}'
       && (needs.deploy-gateway.result == 'success' || needs.deploy-gateway.result == 'skipped')
     strategy:
