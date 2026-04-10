@@ -308,8 +308,35 @@ jobs:
           name: macos-mesh-worker
           path: meshcore/mesh-worker
 
+  # ── Silero VAD 模型 ──
+  # whisper.cpp 内置 silero VAD 支持; 模型与 whisper-server 同目录, mesh-worker
+  # 启动 whisper-server 时如果发现 ggml-silero-v5.1.2.bin 存在就自动加 --vad 参数。
+  # silero ggml 模型文件 ~2.2MB, 由 ggerganov/whisper.cpp HF 仓库托管。
+  silero-vad-model:
+    if: github.event.inputs.mesh_worker_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download silero ggml model
+        run: |
+          mkdir -p artifacts
+          # whisper.cpp 官方 silero 模型托管在 ggml-org/whisper-vad (大小 ~865KB)
+          # 由 whisper.cpp/models/download-vad-model.sh 引用,与 v1.8.4 兼容
+          curl -fsSL -o artifacts/ggml-silero-v5.1.2.bin \
+            https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+          ls -la artifacts/ggml-silero-v5.1.2.bin
+          # 简单 sanity check: 文件大小应该 > 100KB
+          size=$(stat -c %s artifacts/ggml-silero-v5.1.2.bin 2>/dev/null || stat -f %z artifacts/ggml-silero-v5.1.2.bin)
+          if [ "$size" -lt 100000 ]; then
+            echo "ERROR: silero model too small ($size bytes), download failed"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: silero-vad-model
+          path: artifacts/ggml-silero-v5.1.2.bin
+
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-nllb-server, windows-mesh-worker, macos-whisper, macos-nllb-server, macos-mesh-worker]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-nllb-server, windows-mesh-worker, macos-whisper, macos-nllb-server, macos-mesh-worker, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
@@ -355,6 +382,10 @@ jobs:
             cp all-artifacts/windows-nllb-server/nllb-server.exe windows-runtime/
           fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
+          # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
+          if [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ]; then
+            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
+          fi
           cd windows-runtime && zip -r ../runtime-windows-x64.zip .
 
       - name: Package macOS runtime
@@ -368,7 +399,11 @@ jobs:
             cp all-artifacts/macos-nllb-server/nllb-server macos-runtime/
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
-          chmod +x macos-runtime/*
+          # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
+          if [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ]; then
+            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
+          fi
+          chmod +x macos-runtime/* 2>/dev/null || true
           cd macos-runtime && zip -r ../runtime-macos-universal.zip .
 
       - uses: actions/upload-artifact@v4
