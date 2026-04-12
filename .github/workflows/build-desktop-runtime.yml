@@ -61,7 +61,7 @@ jobs:
           git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (CPU)
         run: |
-          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
           cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
@@ -98,7 +98,7 @@ jobs:
           git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (CUDA)
         run: |
-          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=ON
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_CUDA=ON
           cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
@@ -148,7 +148,7 @@ jobs:
           git apply ../ooeoeo/client/platform/runtime-patches/whisper-server-abort.patch
       - name: Build (Vulkan)
         run: |
-          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_VULKAN=ON
+          cmake -S whisper-cpp -B whisper-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_VULKAN=ON
           cmake --build whisper-cpp/build --config Release --target whisper-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
