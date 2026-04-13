@@ -48,6 +48,10 @@ jobs:
       node_matrix: ${{ steps.topology.outputs.node_matrix }}
       should_deploy_gateway: ${{ steps.deploy_targets.outputs.should_deploy_gateway }}
       should_deploy_node: ${{ steps.deploy_targets.outputs.should_deploy_node }}
+      # 本次构建的 gateway/node 组件子集 (空格分隔)。
+      # deploy 步骤只会 pull/up 这些组件,避免触碰未被构建的服务 tag。
+      built_gateway_components: ${{ steps.deploy_targets.outputs.built_gateway_components }}
+      built_node_components: ${{ steps.deploy_targets.outputs.built_node_components }}
     steps:
       - name: Determine tag
         id: tag
@@ -79,27 +83,53 @@ jobs:
           MATRIX=$(jq -nc --argjson inc "$FILTERED" '{include:$inc}')
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-      # 根据本次 build 的 components 决定要 deploy 哪一组服务器:
-      #   - gateway 上跑 website + web-console, 任一被构建就 deploy gateway
-      #   - node 上跑 cloud_v1, cloud_v1 被构建就 deploy node
-      # 没被 build 的 image 在 GHCR 没有新 tag, 强行 pull 会失败。
+      # 根据本次 build 的 components 决定要 deploy 哪一组服务器,并列出每组
+      # 实际要部署的服务子集。没被 build 的 image 在 GHCR 没有新 tag,
+      # deploy 步骤只会对被 build 的子集执行 pull/up。
+      #
+      # gateway 上跑 website + web-console,node 上跑 cloud_v1。
       - name: Determine deploy targets
         id: deploy_targets
         run: |
           COMPONENTS="${{ github.event.inputs.components || github.event.client_payload.components || 'all' }}"
-          if [[ "$COMPONENTS" = "all" || "$COMPONENTS" =~ website || "$COMPONENTS" =~ web-console ]]; then
+
+          # 展开 all → 全集
+          if [ "$COMPONENTS" = "all" ]; then
+            EXPANDED="cloud_v1,website,web-console"
+          else
+            EXPANDED="$COMPONENTS"
+          fi
+
+          # 规范化成空格分隔 (去掉空格)
+          EXPANDED_NORM=$(echo "$EXPANDED" | tr ',' ' ' | tr -s ' ')
+
+          GATEWAY_BUILT=""
+          NODE_BUILT=""
+          for c in $EXPANDED_NORM; do
+            case "$c" in
+              website|web-console) GATEWAY_BUILT="$GATEWAY_BUILT $c" ;;
+              cloud_v1)            NODE_BUILT="$NODE_BUILT $c" ;;
+            esac
+          done
+          GATEWAY_BUILT=$(echo "$GATEWAY_BUILT" | xargs || true)
+          NODE_BUILT=$(echo "$NODE_BUILT" | xargs || true)
+
+          if [ -n "$GATEWAY_BUILT" ]; then
             echo "should_deploy_gateway=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_deploy_gateway=false" >> "$GITHUB_OUTPUT"
           fi
-          if [[ "$COMPONENTS" = "all" || "$COMPONENTS" =~ cloud_v1 ]]; then
+          if [ -n "$NODE_BUILT" ]; then
             echo "should_deploy_node=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_deploy_node=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "built_gateway_components=$GATEWAY_BUILT" >> "$GITHUB_OUTPUT"
+          echo "built_node_components=$NODE_BUILT" >> "$GITHUB_OUTPUT"
+
           echo "components=$COMPONENTS"
-          echo "should_deploy_gateway=$(grep should_deploy_gateway "$GITHUB_OUTPUT" | tail -1)"
-          echo "should_deploy_node=$(grep should_deploy_node "$GITHUB_OUTPUT" | tail -1)"
+          echo "gateway_built=$GATEWAY_BUILT"
+          echo "node_built=$NODE_BUILT"
 
       # ── 解析部署 topology（来自 GitHub vars）──
       # vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 用同一格式:
@@ -166,11 +196,14 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.MYJOY_PAT }}
 
+      # 用 MYJOY_PAT (用户域 PAT, 需 write:packages + read:packages scope)
+      # 而非 GITHUB_TOKEN。MYJOY_PAT 的 owner 是用户,对名下所有 ghcr
+      # package 都有访问权,不受 repo 链接权限影响 —— 更鲁棒。
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.MYJOY_PAT }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -223,32 +256,57 @@ jobs:
     steps:
       - name: Deploy gateway ${{ matrix.name }}
         uses: appleboy/ssh-action@v1
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          NAME: ${{ matrix.name }}
+          BUILT: ${{ needs.prepare.outputs.built_gateway_components }}
         with:
           host: ${{ matrix.host }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: VERSION,NAME
+          envs: VERSION,NAME,BUILT
           script: |
             set -euo pipefail
             cd /opt/ooeoeo/deploy/scaling
 
-            VERSION="${{ needs.prepare.outputs.tag }}"
-            NAME="${{ matrix.name }}"
-            echo "=== [GATEWAY $NAME] Deploying $VERSION ==="
+            echo "=== [GATEWAY $NAME] Deploying $VERSION (components: $BUILT) ==="
 
-            PREV_TAG=$(grep '^OOOEOEO_IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
-            echo "PREV_TAG=$PREV_TAG"
+            # service name → .env 变量名: website → OOOEOEO_WEBSITE_TAG
+            to_var() {
+              local svc="$1"
+              local upper=$(echo "$svc" | tr 'a-z-' 'A-Z_')
+              echo "OOOEOEO_${upper}_TAG"
+            }
 
-            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env
+            # 幂等 upsert .env 里的 key=value
+            upsert_env() {
+              local key="$1" value="$2"
+              if grep -q "^${key}=" .env 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${value}|" .env
+              else
+                echo "${key}=${value}" >> .env
+              fi
+            }
 
-            echo "--- Pulling gateway images ---"
-            docker compose -f docker-compose.gateway.yml pull website web-console
+            # 记录所有被改动组件的旧 tag,用于潜在回滚 (gateway 当前不做 healthcheck,
+            # 但保留信息方便手动回退)。
+            declare -A PREV_TAGS=()
+            for svc in $BUILT; do
+              var=$(to_var "$svc")
+              prev=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "latest")
+              PREV_TAGS[$svc]="$prev"
+              echo "  $svc: $prev → $VERSION"
+              upsert_env "$var" "$VERSION"
+            done
 
-            echo "--- Restarting gateway services ---"
-            docker compose -f docker-compose.gateway.yml up -d --no-deps website web-console
+            echo "--- Pulling: $BUILT ---"
+            docker compose -f docker-compose.gateway.yml pull $BUILT
+
+            echo "--- Restarting: $BUILT ---"
+            docker compose -f docker-compose.gateway.yml up -d --no-deps $BUILT
 
             echo "=== [GATEWAY $NAME] Deploy $VERSION succeeded ==="
-            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'website|web-console' || true
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "$(echo $BUILT | tr ' ' '|')" || true
 
   deploy-node:
     needs: [prepare, build-and-push, deploy-gateway]
@@ -272,49 +330,74 @@ jobs:
     steps:
       - name: Deploy node ${{ matrix.name }}
         uses: appleboy/ssh-action@v1
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          NAME: ${{ matrix.name }}
+          BUILT: ${{ needs.prepare.outputs.built_node_components }}
         with:
           host: ${{ matrix.host }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: VERSION,NAME
+          envs: VERSION,NAME,BUILT
           script: |
             set -euo pipefail
             cd /opt/ooeoeo/deploy/scaling
 
-            VERSION="${{ needs.prepare.outputs.tag }}"
-            NAME="${{ matrix.name }}"
-            echo "=== [NODE $NAME] Deploying $VERSION ==="
+            echo "=== [NODE $NAME] Deploying $VERSION (components: $BUILT) ==="
 
-            PREV_TAG=$(grep '^OOOEOEO_IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
-            echo "PREV_TAG=$PREV_TAG"
+            to_var() {
+              local svc="$1"
+              local upper=$(echo "$svc" | tr 'a-z-' 'A-Z_')
+              echo "OOOEOEO_${upper}_TAG"
+            }
 
-            sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$VERSION/" .env
-
-            echo "--- Pulling node images ---"
-            docker compose -f docker-compose.node.yml pull cloud_v1
-
-            echo "--- Restarting cloud_v1 ---"
-            docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
-
-            echo "=== [NODE $NAME] Health check ==="
-            OK=0
-            for i in $(seq 1 12); do
-              sleep 5
-              if docker compose -f docker-compose.node.yml exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
-                OK=1
-                break
+            upsert_env() {
+              local key="$1" value="$2"
+              if grep -q "^${key}=" .env 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${value}|" .env
+              else
+                echo "${key}=${value}" >> .env
               fi
-              echo "  Attempt $i/12 — waiting..."
+            }
+
+            declare -A PREV_TAGS=()
+            for svc in $BUILT; do
+              var=$(to_var "$svc")
+              prev=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "latest")
+              PREV_TAGS[$svc]="$prev"
+              echo "  $svc: $prev → $VERSION"
+              upsert_env "$var" "$VERSION"
             done
 
-            if [ "$OK" -ne 1 ]; then
-              echo "=== [NODE $NAME] HEALTH CHECK FAILED — ROLLING BACK to $PREV_TAG ==="
-              sed -i "s/^OOOEOEO_IMAGE_TAG=.*/OOOEOEO_IMAGE_TAG=$PREV_TAG/" .env
-              docker compose -f docker-compose.node.yml pull cloud_v1
-              docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
-              echo "=== [NODE $NAME] Rollback complete ==="
-              exit 1
+            echo "--- Pulling: $BUILT ---"
+            docker compose -f docker-compose.node.yml pull $BUILT
+
+            echo "--- Restarting: $BUILT ---"
+            docker compose -f docker-compose.node.yml up -d --no-deps $BUILT
+
+            # cloud_v1 健康检查 (只在 cloud_v1 被重启时做)
+            if echo " $BUILT " | grep -q " cloud_v1 "; then
+              echo "=== [NODE $NAME] Health check cloud_v1 ==="
+              OK=0
+              for i in $(seq 1 12); do
+                sleep 5
+                if docker compose -f docker-compose.node.yml exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
+                  OK=1
+                  break
+                fi
+                echo "  Attempt $i/12 — waiting..."
+              done
+
+              if [ "$OK" -ne 1 ]; then
+                prev_cloud="${PREV_TAGS[cloud_v1]}"
+                echo "=== [NODE $NAME] HEALTH CHECK FAILED — ROLLING BACK cloud_v1 to $prev_cloud ==="
+                upsert_env "$(to_var cloud_v1)" "$prev_cloud"
+                docker compose -f docker-compose.node.yml pull cloud_v1
+                docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
+                echo "=== [NODE $NAME] Rollback complete ==="
+                exit 1
+              fi
             fi
 
             echo "=== [NODE $NAME] Deploy $VERSION succeeded ==="
-            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep cloud_v1 || true
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "$(echo $BUILT | tr ' ' '|')" || true
