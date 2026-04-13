@@ -166,15 +166,11 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.MYJOY_PAT }}
 
-      # 使用 MYJOY_PAT (用户域 PAT, 含 write:packages) 而非 repo 域 GITHUB_TOKEN。
-      # 原因: 本 workflow 推送的镜像 package 归属 Dominik2077w/Myjoy (私有),
-      # ooeoeo 仓库的 GITHUB_TOKEN 默认无权读/写这些 package, HEAD blob 会 403。
-      # 用 PAT 走用户域鉴权, 覆盖所有本人拥有的 ghcr package。
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.MYJOY_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
 
