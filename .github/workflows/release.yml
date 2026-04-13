@@ -52,13 +52,17 @@ jobs:
         id: version
         shell: bash
         run: |
+          # 支持用户传 "v1.3.3" 或 "1.3.3" 两种写法。MSBuild -p:Version 要求纯 SemVer
+          # (不含 'v' 前缀), 否则 NuGet Restore 会抛 "'v1.3.3' is not a valid version string"。
+          # 统一归一化到不含 'v' 的形式, 后续 filename/release 里要 'v' 的再自己加上。
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.client_payload.version }}"
             echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
           else
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.inputs.version }}"
             echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
           fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
 
       - name: Checkout Myjoy (private)
         uses: actions/checkout@v4
@@ -161,13 +165,15 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          # 归一化 'v1.3.3' → '1.3.3', 见 build-windows job 的同名步骤说明。
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.client_payload.version }}"
             echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
           else
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.inputs.version }}"
             echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
           fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
 
       - name: Checkout Myjoy (private)
         uses: actions/checkout@v4
@@ -296,11 +302,13 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          # 归一化 'v1.3.3' → '1.3.3', 见 build-windows job 的同名步骤说明。
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.client_payload.version }}"
           else
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            raw="${{ github.event.inputs.version }}"
           fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
 
       - name: Download macOS artifact
         if: needs.build-macos.result == 'success'
