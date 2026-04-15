@@ -114,23 +114,32 @@ jobs:
           Get-ChildItem $pubDir -Filter "*.exe" | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1MB, 1)) MB)" }
           Get-ChildItem $pubDir -Filter "Microsoft.WindowsAppRuntime*" | ForEach-Object { Write-Host "  $($_.Name)" }
 
-      # 下载 runtime（从本仓库已有的 desktop/* release）
+      # 下载 runtime（固定从 desktop/runtime tag 拉）
+      #
+      # 历史坑：之前的查询是 `gh api .../releases` 然后 jq 过滤 startswith("desktop/"),
+      # 但 /releases 默认 per_page=30 只返回最新 30 个,每发一版 v1.3.x 都会把
+      # desktop/runtime 往后挤。发到第 30 个 v1.3.x 的时候 desktop/runtime 掉出
+      # 第一页,ASSET_URL 变空串,download 步骤静默继续,runtime-dist 留空,
+      # Inno Setup 撞到 line 56 `No files found matching runtime-dist\*` 挂掉。
+      # 改成按 tag 直接查,O(1) 无分页问题。注意 desktop/runtime 的斜杠要 URL-encode
+      # 成 `desktop%2Fruntime`(gh api 不自动转义 path 里的 /)。
       - name: Download runtime
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(gh api repos/${{ github.repository }}/releases \
-            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
+          ASSET_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
 
           mkdir -p ooeoeo/client/platform/desktop-windows/runtime-dist
-          if [ -n "$ASSET_URL" ]; then
-            echo "Downloading runtime from: $ASSET_URL"
-            curl -L -o runtime-windows-x64.zip "$ASSET_URL"
-            cd ooeoeo/client/platform/desktop-windows/runtime-dist && unzip $GITHUB_WORKSPACE/runtime-windows-x64.zip
-          else
-            echo "WARNING: No runtime release found."
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: desktop/runtime release not found or missing runtime-windows-x64.zip asset."
+            echo "       Run the 'Build Desktop Runtime' workflow first to populate this release."
+            exit 1
           fi
+          echo "Downloading runtime from: $ASSET_URL"
+          curl -L -o runtime-windows-x64.zip "$ASSET_URL"
+          cd ooeoeo/client/platform/desktop-windows/runtime-dist && unzip $GITHUB_WORKSPACE/runtime-windows-x64.zip
 
       # Inno Setup 编译安装器
       - name: Build Installer (Inno Setup)
@@ -215,6 +224,9 @@ jobs:
             -configuration Debug 2>&1 || echo "Tests skipped"
 
       # 下载 runtime 并注入 .app bundle
+      # 历史坑见 Build Windows 的 Download runtime 步骤注释:/releases 默认
+      # per_page=30 会让 desktop/runtime 在发版多次后被挤下第一页,ASSET_URL
+      # 查询失败后静默继续。改成按 tag 直接查,并在缺失时 fail-fast。
       - name: Download and bundle runtime
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -223,17 +235,18 @@ jobs:
           APP="dist/OoeoeoEngine.app"
           mkdir -p "$APP/Contents/Resources/runtime"
 
-          ASSET_URL=$(gh api repos/${{ github.repository }}/releases \
-            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
+          ASSET_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
 
-          if [ -n "$ASSET_URL" ]; then
-            echo "Downloading runtime from: $ASSET_URL"
-            curl -L -o /tmp/runtime-macos-universal.zip "$ASSET_URL"
-            unzip -o /tmp/runtime-macos-universal.zip -d "$APP/Contents/Resources/runtime/"
-            chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
-          else
-            echo "WARNING: No runtime release found."
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: desktop/runtime release not found or missing runtime-macos-universal.zip asset."
+            echo "       Run the 'Build Desktop Runtime' workflow first to populate this release."
+            exit 1
           fi
+          echo "Downloading runtime from: $ASSET_URL"
+          curl -L -o /tmp/runtime-macos-universal.zip "$ASSET_URL"
+          unzip -o /tmp/runtime-macos-universal.zip -d "$APP/Contents/Resources/runtime/"
+          chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
 
       # macOS 代码签名（当证书 secrets 可用时执行）
       - name: Code sign (if certificate available)
