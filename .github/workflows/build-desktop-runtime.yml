@@ -1,5 +1,5 @@
 # 构建桌面端 runtime 二进制
-# 产物：whisper-server + nllb-server + mesh-worker
+# 产物：whisper-server + opus-mt-server + mesh-worker
 # 平台：Windows x64 (CPU/CUDA/Vulkan) + macOS Universal (Metal/CPU)
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
 #
@@ -24,7 +24,7 @@ on:
         required: false
         default: "main"
       mesh_worker_only:
-        description: "仅重编 mesh-worker（跳过 whisper/nllb 构建）"
+        description: "仅重编 mesh-worker（跳过 whisper/opus-mt 构建）"
         required: false
         default: "false"
         type: boolean
@@ -162,7 +162,7 @@ jobs:
           name: windows-whisper-vulkan
           path: artifacts/whisper-server-vulkan.exe
 
-  windows-nllb-server:
+  windows-opus-mt-server:
     if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     steps:
@@ -175,14 +175,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install -r ooeoeo/client/platform/nllb-server/requirements.txt
+      - run: pip install -r ooeoeo/client/platform/opus-mt-server/requirements.txt
       - name: Build
-        working-directory: ooeoeo/client/platform/nllb-server
-        run: pyinstaller nllb_server.spec --noconfirm
+        working-directory: ooeoeo/client/platform/opus-mt-server
+        run: pyinstaller opus_mt_server.spec --noconfirm
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-nllb-server
-          path: ooeoeo/client/platform/nllb-server/dist/nllb-server.exe
+          name: windows-opus-mt-server
+          path: ooeoeo/client/platform/opus-mt-server/dist/opus-mt-server.exe
 
   windows-mesh-worker:
     runs-on: ubuntu-latest
@@ -244,7 +244,7 @@ jobs:
           name: macos-whisper
           path: artifacts/
 
-  macos-nllb-server:
+  macos-opus-mt-server:
     if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: macos-14
     steps:
@@ -257,32 +257,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install -r ooeoeo/client/platform/nllb-server/requirements.txt
+      - run: pip install -r ooeoeo/client/platform/opus-mt-server/requirements.txt
       - name: Build arm64
-        working-directory: ooeoeo/client/platform/nllb-server
+        working-directory: ooeoeo/client/platform/opus-mt-server
         run: |
-          pyinstaller nllb_server.spec --noconfirm
-          mv dist/nllb-server dist/nllb-server-arm64
+          pyinstaller opus_mt_server.spec --noconfirm
+          mv dist/opus-mt-server dist/opus-mt-server-arm64
       - name: Build x86_64 via Rosetta
-        working-directory: ooeoeo/client/platform/nllb-server
+        working-directory: ooeoeo/client/platform/opus-mt-server
         continue-on-error: true
         run: |
           arch -x86_64 /usr/bin/python3 -m pip install -r requirements.txt --target .x86deps
-          PYTHONPATH=.x86deps arch -x86_64 /usr/bin/python3 -m PyInstaller nllb_server.spec --noconfirm --distpath dist-x86
-          mv dist-x86/nllb-server dist/nllb-server-x86_64
+          PYTHONPATH=.x86deps arch -x86_64 /usr/bin/python3 -m PyInstaller opus_mt_server.spec --noconfirm --distpath dist-x86
+          mv dist-x86/opus-mt-server dist/opus-mt-server-x86_64
       - name: Universal Binary
         run: |
-          cd ooeoeo/client/platform/nllb-server/dist
-          if [ -f nllb-server-x86_64 ]; then
-            lipo -create nllb-server-arm64 nllb-server-x86_64 -output nllb-server
+          cd ooeoeo/client/platform/opus-mt-server/dist
+          if [ -f opus-mt-server-x86_64 ]; then
+            lipo -create opus-mt-server-arm64 opus-mt-server-x86_64 -output opus-mt-server
           else
-            cp nllb-server-arm64 nllb-server
+            cp opus-mt-server-arm64 opus-mt-server
           fi
-          chmod +x nllb-server
+          chmod +x opus-mt-server
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-nllb-server
-          path: ooeoeo/client/platform/nllb-server/dist/nllb-server
+          name: macos-opus-mt-server
+          path: ooeoeo/client/platform/opus-mt-server/dist/opus-mt-server
 
   macos-mesh-worker:
     runs-on: macos-14
@@ -336,7 +336,7 @@ jobs:
           path: artifacts/ggml-silero-v5.1.2.bin
 
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-nllb-server, windows-mesh-worker, macos-whisper, macos-nllb-server, macos-mesh-worker, silero-vad-model]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-mesh-worker, macos-whisper, macos-opus-mt-server, macos-mesh-worker, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
@@ -347,7 +347,7 @@ jobs:
         with:
           path: all-artifacts
 
-      # mesh_worker_only 模式：从现有 release 下载 whisper/nllb 二进制
+      # mesh_worker_only 模式：从现有 release 下载 whisper/opus-mt 二进制
       - name: Download existing runtime (mesh-worker-only mode)
         if: env.MESH_WORKER_ONLY == 'true'
         run: |
@@ -373,13 +373,13 @@ jobs:
         run: |
           mkdir -p windows-runtime
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            # 复用现有 whisper/nllb，只替换 mesh-worker
+            # 复用现有 whisper/opus-mt，只替换 mesh-worker
             cp existing-win/* windows-runtime/ 2>/dev/null || true
           else
             cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
             cp all-artifacts/windows-whisper-cuda/* windows-runtime/
             cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
-            cp all-artifacts/windows-nllb-server/nllb-server.exe windows-runtime/
+            cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/
           fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
           # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
@@ -392,11 +392,11 @@ jobs:
         run: |
           mkdir -p macos-runtime
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            # 复用现有 whisper/nllb，只替换 mesh-worker
+            # 复用现有 whisper/opus-mt，只替换 mesh-worker
             cp existing-mac/* macos-runtime/ 2>/dev/null || true
           else
             cp all-artifacts/macos-whisper/* macos-runtime/
-            cp all-artifacts/macos-nllb-server/nllb-server macos-runtime/
+            cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
           # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
@@ -434,6 +434,6 @@ jobs:
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
             --title "Desktop Runtime $TAG" \
-            --notes "Runtime binaries (whisper-server, nllb-server, mesh-worker) for desktop engine." \
+            --notes "Runtime binaries (whisper-server, opus-mt-server, mesh-worker) for desktop engine." \
             release-artifacts/runtime-windows-x64/runtime-windows-x64.zip \
             release-artifacts/runtime-macos-universal/runtime-macos-universal.zip
