@@ -23,8 +23,13 @@ on:
         description: "Myjoy Git ref"
         required: false
         default: "main"
+      skip_whisper:
+        description: "跳过 whisper 构建（whisper 从上次 release 复用，仅构建 mesh-worker + opus-mt-server）"
+        required: false
+        default: "false"
+        type: boolean
       mesh_worker_only:
-        description: "仅重编 mesh-worker（跳过 whisper/opus-mt 构建）"
+        description: "仅重编 mesh-worker（跳过 whisper + opus-mt 构建）"
         required: false
         default: "false"
         type: boolean
@@ -43,7 +48,7 @@ permissions:
 
 jobs:
   windows-whisper-cpu:
-    if: github.event.inputs.mesh_worker_only != 'true'
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout Myjoy
@@ -76,7 +81,7 @@ jobs:
           path: artifacts/whisper-server-cpu.exe
 
   windows-whisper-cuda:
-    if: github.event.inputs.mesh_worker_only != 'true'
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout Myjoy
@@ -119,7 +124,7 @@ jobs:
           path: artifacts/
 
   windows-whisper-vulkan:
-    if: github.event.inputs.mesh_worker_only != 'true'
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: windows-latest
     env:
       VULKAN_SDK_VERSION: "1.4.304.1"
@@ -208,7 +213,7 @@ jobs:
           path: meshcore/mesh-worker.exe
 
   macos-whisper:
-    if: github.event.inputs.mesh_worker_only != 'true'
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: macos-14
     steps:
       - name: Checkout Myjoy
@@ -313,7 +318,7 @@ jobs:
   # 启动 whisper-server 时如果发现 ggml-silero-v5.1.2.bin 存在就自动加 --vad 参数。
   # silero ggml 模型文件 ~2.2MB, 由 ggerganov/whisper.cpp HF 仓库托管。
   silero-vad-model:
-    if: github.event.inputs.mesh_worker_only != 'true'
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download silero ggml model
@@ -342,16 +347,17 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MESH_WORKER_ONLY: ${{ github.event.inputs.mesh_worker_only }}
+      SKIP_WHISPER: ${{ github.event.inputs.skip_whisper }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: all-artifacts
 
-      # mesh_worker_only 模式：从现有 release 下载 whisper/opus-mt 二进制
-      - name: Download existing runtime (mesh-worker-only mode)
-        if: env.MESH_WORKER_ONLY == 'true'
+      # skip_whisper / mesh_worker_only 模式：从现有 release 下载 whisper 二进制复用
+      - name: Download existing runtime (reuse whisper)
+        if: env.MESH_WORKER_ONLY == 'true' || env.SKIP_WHISPER == 'true'
         run: |
-          # 下载现有 Windows runtime
+          # 下载现有 Windows runtime（取 whisper + silero VAD）
           WIN_URL=$(gh api repos/${{ github.repository }}/releases \
             --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
           if [ -n "$WIN_URL" ]; then
@@ -372,37 +378,50 @@ jobs:
       - name: Package Windows runtime
         run: |
           mkdir -p windows-runtime
-          if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            # 复用现有 whisper/opus-mt，只替换 mesh-worker
-            cp existing-win/* windows-runtime/ 2>/dev/null || true
+          REUSE_WHISPER="${MESH_WORKER_ONLY:-false}"
+          [ "$SKIP_WHISPER" = "true" ] && REUSE_WHISPER="true"
+
+          if [ "$REUSE_WHISPER" = "true" ]; then
+            # 从现有 release 复用 whisper + silero VAD
+            for f in whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe ggml-silero-v5.1.2.bin cudart64_*.dll cublas64_*.dll cublasLt64_*.dll; do
+              cp existing-win/$f windows-runtime/ 2>/dev/null || true
+            done
           else
             cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
             cp all-artifacts/windows-whisper-cuda/* windows-runtime/
             cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
-            cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/
+            [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ] && cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
+          fi
+          # opus-mt-server: 新构建或复用
+          if [ "$MESH_WORKER_ONLY" = "true" ]; then
+            cp existing-win/opus-mt-server.exe windows-runtime/ 2>/dev/null || true
+          else
+            cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/ 2>/dev/null || true
           fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
-          # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
-          if [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ]; then
-            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
-          fi
           cd windows-runtime && zip -r ../runtime-windows-x64.zip .
 
       - name: Package macOS runtime
         run: |
           mkdir -p macos-runtime
-          if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            # 复用现有 whisper/opus-mt，只替换 mesh-worker
-            cp existing-mac/* macos-runtime/ 2>/dev/null || true
+          REUSE_WHISPER="${MESH_WORKER_ONLY:-false}"
+          [ "$SKIP_WHISPER" = "true" ] && REUSE_WHISPER="true"
+
+          if [ "$REUSE_WHISPER" = "true" ]; then
+            for f in whisper-server ggml-silero-v5.1.2.bin default.metallib ggml-metal.metallib; do
+              cp existing-mac/$f macos-runtime/ 2>/dev/null || true
+            done
           else
             cp all-artifacts/macos-whisper/* macos-runtime/
-            cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/
+            [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ] && cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
+          fi
+          # opus-mt-server: 新构建或复用
+          if [ "$MESH_WORKER_ONLY" = "true" ]; then
+            cp existing-mac/opus-mt-server macos-runtime/ 2>/dev/null || true
+          else
+            cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/ 2>/dev/null || true
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
-          # silero VAD 模型 (与 whisper-server 同目录, desktop engine 启动时自动检测)
-          if [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ]; then
-            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
-          fi
           chmod +x macos-runtime/* 2>/dev/null || true
           cd macos-runtime && zip -r ../runtime-macos-universal.zip .
 
