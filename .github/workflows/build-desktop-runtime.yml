@@ -353,27 +353,37 @@ jobs:
         with:
           path: all-artifacts
 
-      # skip_whisper / mesh_worker_only 模式：从现有 release 下载 whisper 二进制复用
+      # skip_whisper / mesh_worker_only 模式：从现有 release 下载 whisper 二进制复用。
+      #
+      # 历史坑（2026-04-19,和 release.yml 同类）: 之前查 `/releases` endpoint 然后 jq 过滤
+      # startswith("desktop/"), 但 /releases 默认 per_page=30, 每发一版 v1.x.x 都会把
+      # desktop/runtime tag 往后挤。发到第 30+ 版时 desktop/runtime 掉出第一页,WIN_URL 变空,
+      # 下面 if 被跳过, existing-win 目录是空的, 后面 cp 失败。
+      # 现在改成直接按 tag 查 /releases/tags/desktop%2Fruntime（O(1),无分页问题）,
+      # 且 URL 空时 fail-fast —— reuse 模式前提就是 existing release 可用,缺就没得 reuse。
       - name: Download existing runtime (reuse whisper)
         if: env.MESH_WORKER_ONLY == 'true' || env.SKIP_WHISPER == 'true'
         run: |
-          # 下载现有 Windows runtime（取 whisper + silero VAD）
-          WIN_URL=$(gh api repos/${{ github.repository }}/releases \
-            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
-          if [ -n "$WIN_URL" ]; then
-            echo "下载现有 Windows runtime..."
-            curl -L -o /tmp/existing-win.zip "$WIN_URL"
-            mkdir -p existing-win && cd existing-win && unzip /tmp/existing-win.zip && cd ..
+          WIN_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
+          if [ -z "$WIN_URL" ]; then
+            echo "ERROR: desktop/runtime release 不存在或缺 runtime-windows-x64.zip, 无法 reuse whisper。"
+            echo "       先跑一次全量 Build Desktop Runtime（不勾 mesh_worker_only / skip_whisper）填充 desktop/runtime tag。"
+            exit 1
           fi
+          echo "下载现有 Windows runtime: $WIN_URL"
+          curl -L -o /tmp/existing-win.zip "$WIN_URL"
+          mkdir -p existing-win && cd existing-win && unzip /tmp/existing-win.zip && cd ..
 
-          # 下载现有 macOS runtime
-          MAC_URL=$(gh api repos/${{ github.repository }}/releases \
-            --jq '[.[] | select(.tag_name | startswith("desktop/"))] | .[0].assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
-          if [ -n "$MAC_URL" ]; then
-            echo "下载现有 macOS runtime..."
-            curl -L -o /tmp/existing-mac.zip "$MAC_URL"
-            mkdir -p existing-mac && cd existing-mac && unzip /tmp/existing-mac.zip && cd ..
+          MAC_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
+          if [ -z "$MAC_URL" ]; then
+            echo "ERROR: desktop/runtime release 缺 runtime-macos-universal.zip, 无法 reuse。"
+            exit 1
           fi
+          echo "下载现有 macOS runtime: $MAC_URL"
+          curl -L -o /tmp/existing-mac.zip "$MAC_URL"
+          mkdir -p existing-mac && cd existing-mac && unzip /tmp/existing-mac.zip && cd ..
 
       - name: Package Windows runtime
         run: |
