@@ -141,6 +141,32 @@ jobs:
           curl -L -o runtime-windows-x64.zip "$ASSET_URL"
           cd ooeoeo/client/platform/desktop-windows/runtime-dist && unzip $GITHUB_WORKSPACE/runtime-windows-x64.zip
 
+          # ── Runtime manifest 校验（下游防线）──
+          # 即使上游 Build Desktop Runtime 已经加了 manifest 校验，desktop/runtime
+          # tag 上的 zip 也可能是在加校验前产出的（历史污染）。此处再查一遍，
+          # 缺文件直接中止发版，避免灌进 installer 推到用户电脑后才发现无法转录。
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+            compgen -G "$pattern" >/dev/null || missing+=("$pattern")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: runtime-windows-x64.zip 内容不完整，缺少必需文件："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "runtime-dist/ 实际内容："
+            ls -la
+            echo ""
+            echo "请先跑一次 'Build Desktop Runtime' workflow（全量构建，不勾选"
+            echo "mesh_worker_only / skip_whisper）产生完整 zip 后再发版。"
+            exit 1
+          fi
+          echo "Runtime manifest OK："
+          ls -la
+
       # Inno Setup 编译安装器
       - name: Build Installer (Inno Setup)
         working-directory: ooeoeo/client/platform/desktop-windows
@@ -247,6 +273,26 @@ jobs:
           curl -L -o /tmp/runtime-macos-universal.zip "$ASSET_URL"
           unzip -o /tmp/runtime-macos-universal.zip -d "$APP/Contents/Resources/runtime/"
           chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
+
+          # ── Runtime manifest 校验（下游防线，同 Windows 端说明）──
+          cd "$APP/Contents/Resources/runtime"
+          required=(whisper-server opus-mt-server mesh-worker ggml-silero-v5.1.2.bin)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: runtime-macos-universal.zip 内容不完整，缺少："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "runtime/ 实际内容："
+            ls -la
+            echo ""
+            echo "请先跑一次 'Build Desktop Runtime' workflow 全量构建。"
+            exit 1
+          fi
+          echo "Runtime manifest OK："
+          ls -la
 
       # macOS 代码签名（当证书 secrets 可用时执行）
       - name: Code sign (if certificate available)

@@ -382,23 +382,60 @@ jobs:
           [ "$SKIP_WHISPER" = "true" ] && REUSE_WHISPER="true"
 
           if [ "$REUSE_WHISPER" = "true" ]; then
-            # 从现有 release 复用 whisper + silero VAD
-            for f in whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe ggml-silero-v5.1.2.bin cudart64_*.dll cublas64_*.dll cublasLt64_*.dll; do
-              cp existing-win/$f windows-runtime/ 2>/dev/null || true
+            # 从现有 release 复用 whisper + silero VAD + CUDA 运行库。
+            # 历史坑：此处曾用 `cp ... 2>/dev/null || true` 静默吞错，
+            # mesh_worker_only 从一个缺 whisper 的 existing release 复用时，
+            # 默默产出不完整 zip，再通过 release delete+create 覆盖线上 tag，
+            # 用户桌面端启动 whisper 报 "inference 未就绪 (Stopped)"。
+            # 现在严格 cp，源文件缺一个立刻 fail。
+            for f in whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe ggml-silero-v5.1.2.bin; do
+              cp "existing-win/$f" windows-runtime/
+            done
+            # CUDA 运行库 DLL 带版本号需 glob 展开；每个 pattern 至少一个匹配
+            for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+              if ! compgen -G "existing-win/$pattern" >/dev/null; then
+                echo "ERROR: existing-win/ 缺 $pattern，无法复用 whisper-cuda。"
+                ls -la existing-win/
+                exit 1
+              fi
+              cp existing-win/$pattern windows-runtime/
             done
           else
             cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
             cp all-artifacts/windows-whisper-cuda/* windows-runtime/
             cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
-            [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ] && cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
+            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
           fi
-          # opus-mt-server: 新构建或复用
+          # opus-mt-server: 新构建或复用（同样严格，缺就 fail）
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            cp existing-win/opus-mt-server.exe windows-runtime/ 2>/dev/null || true
+            cp existing-win/opus-mt-server.exe windows-runtime/
           else
-            cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/ 2>/dev/null || true
+            cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/
           fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
+
+          # ── 产物 manifest 校验 ──
+          # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
+          # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "windows-runtime/$f" ] || missing+=("$f")
+          done
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+            compgen -G "windows-runtime/$pattern" >/dev/null || missing+=("$pattern")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: Windows runtime manifest 校验失败，缺少："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "windows-runtime/ 实际内容："
+            ls -la windows-runtime/
+            exit 1
+          fi
+          echo "Windows runtime manifest OK："
+          ls -la windows-runtime/
+
           cd windows-runtime && zip -r ../runtime-windows-x64.zip .
 
       - name: Package macOS runtime
@@ -408,21 +445,45 @@ jobs:
           [ "$SKIP_WHISPER" = "true" ] && REUSE_WHISPER="true"
 
           if [ "$REUSE_WHISPER" = "true" ]; then
-            for f in whisper-server ggml-silero-v5.1.2.bin default.metallib ggml-metal.metallib; do
-              cp existing-mac/$f macos-runtime/ 2>/dev/null || true
+            # 历史坑同 Windows 端（见 Package Windows runtime 注释）：严格 cp 必需项。
+            # whisper-server + silero VAD 必需；.metallib 是 Metal 着色器库，老 build
+            # 可能没打进去，视为可选。
+            for f in whisper-server ggml-silero-v5.1.2.bin; do
+              cp "existing-mac/$f" macos-runtime/
+            done
+            for f in default.metallib ggml-metal.metallib; do
+              if [ -f "existing-mac/$f" ]; then cp "existing-mac/$f" macos-runtime/; fi
             done
           else
             cp all-artifacts/macos-whisper/* macos-runtime/
-            [ -f all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin ] && cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
+            cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
           fi
-          # opus-mt-server: 新构建或复用
+          # opus-mt-server: 新构建或复用（严格，缺就 fail）
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
-            cp existing-mac/opus-mt-server macos-runtime/ 2>/dev/null || true
+            cp existing-mac/opus-mt-server macos-runtime/
           else
-            cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/ 2>/dev/null || true
+            cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
           chmod +x macos-runtime/* 2>/dev/null || true
+
+          # ── 产物 manifest 校验 ──
+          required=(whisper-server opus-mt-server mesh-worker ggml-silero-v5.1.2.bin)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "macos-runtime/$f" ] || missing+=("$f")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: macOS runtime manifest 校验失败，缺少："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "macos-runtime/ 实际内容："
+            ls -la macos-runtime/
+            exit 1
+          fi
+          echo "macOS runtime manifest OK："
+          ls -la macos-runtime/
+
           cd macos-runtime && zip -r ../runtime-macos-universal.zip .
 
       - uses: actions/upload-artifact@v4
