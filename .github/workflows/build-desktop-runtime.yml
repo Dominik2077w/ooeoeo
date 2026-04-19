@@ -189,6 +189,28 @@ jobs:
           name: windows-opus-mt-server
           path: ooeoeo/client/platform/opus-mt-server/dist/opus-mt-server.exe
 
+  windows-madlad-server:
+    if: github.event.inputs.mesh_worker_only != 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r ooeoeo/client/platform/madlad-server/requirements.txt
+      - name: Build
+        working-directory: ooeoeo/client/platform/madlad-server
+        run: pyinstaller madlad_server.spec --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-madlad-server
+          path: ooeoeo/client/platform/madlad-server/dist/madlad-server.exe
+
   windows-mesh-worker:
     runs-on: ubuntu-latest
     steps:
@@ -289,6 +311,46 @@ jobs:
           name: macos-opus-mt-server
           path: ooeoeo/client/platform/opus-mt-server/dist/opus-mt-server
 
+  macos-madlad-server:
+    if: github.event.inputs.mesh_worker_only != 'true'
+    runs-on: macos-14
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r ooeoeo/client/platform/madlad-server/requirements.txt
+      - name: Build arm64
+        working-directory: ooeoeo/client/platform/madlad-server
+        run: |
+          pyinstaller madlad_server.spec --noconfirm
+          mv dist/madlad-server dist/madlad-server-arm64
+      - name: Build x86_64 via Rosetta
+        working-directory: ooeoeo/client/platform/madlad-server
+        continue-on-error: true
+        run: |
+          arch -x86_64 /usr/bin/python3 -m pip install -r requirements.txt --target .x86deps
+          PYTHONPATH=.x86deps arch -x86_64 /usr/bin/python3 -m PyInstaller madlad_server.spec --noconfirm --distpath dist-x86
+          mv dist-x86/madlad-server dist/madlad-server-x86_64
+      - name: Universal Binary
+        run: |
+          cd ooeoeo/client/platform/madlad-server/dist
+          if [ -f madlad-server-x86_64 ]; then
+            lipo -create madlad-server-arm64 madlad-server-x86_64 -output madlad-server
+          else
+            cp madlad-server-arm64 madlad-server
+          fi
+          chmod +x madlad-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-madlad-server
+          path: ooeoeo/client/platform/madlad-server/dist/madlad-server
+
   macos-mesh-worker:
     runs-on: macos-14
     steps:
@@ -341,7 +403,7 @@ jobs:
           path: artifacts/ggml-silero-v5.1.2.bin
 
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-mesh-worker, macos-whisper, macos-opus-mt-server, macos-mesh-worker, silero-vad-model]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-madlad-server, windows-mesh-worker, macos-whisper, macos-opus-mt-server, macos-madlad-server, macos-mesh-worker, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
@@ -416,18 +478,22 @@ jobs:
             cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
             cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
           fi
-          # opus-mt-server: 新构建或复用（同样严格，缺就 fail）
+          # opus-mt-server / madlad-server: 新构建或复用 (严格, 缺就 fail)
+          # MADLAD 是本期新增,老的 runtime tag 不含 madlad-server.exe, reuse 会直接失败 ——
+          # 这是故意的: mesh_worker_only 模式发版前必须先跑一次全量 build, 把 madlad 录进去。
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
             cp existing-win/opus-mt-server.exe windows-runtime/
+            cp existing-win/madlad-server.exe windows-runtime/
           else
             cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/
+            cp all-artifacts/windows-madlad-server/madlad-server.exe windows-runtime/
           fi
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
 
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
           missing=()
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
@@ -468,17 +534,19 @@ jobs:
             cp all-artifacts/macos-whisper/* macos-runtime/
             cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
           fi
-          # opus-mt-server: 新构建或复用（严格，缺就 fail）
+          # opus-mt-server / madlad-server: 新构建或复用 (严格,缺就 fail)
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
             cp existing-mac/opus-mt-server macos-runtime/
+            cp existing-mac/madlad-server macos-runtime/
           else
             cp all-artifacts/macos-opus-mt-server/opus-mt-server macos-runtime/
+            cp all-artifacts/macos-madlad-server/madlad-server macos-runtime/
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
           chmod +x macos-runtime/* 2>/dev/null || true
 
           # ── 产物 manifest 校验 ──
-          required=(whisper-server opus-mt-server mesh-worker ggml-silero-v5.1.2.bin)
+          required=(whisper-server opus-mt-server madlad-server mesh-worker ggml-silero-v5.1.2.bin)
           missing=()
           for f in "${required[@]}"; do
             [ -f "macos-runtime/$f" ] || missing+=("$f")
