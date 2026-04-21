@@ -400,24 +400,47 @@ jobs:
           [ -f "$SHA_MAC" ] && ASSETS="$ASSETS $SHA_MAC"
           [ -f "$SHA_WIN" ] && ASSETS="$ASSETS $SHA_WIN"
 
+          # 根据实际构建出的产物决定 release title / notes。
+          # 单平台触发时(只构建 macOS 或只构建 Windows),下载表里只列有产物的那一行,
+          # 避免用户看到没有对应 asset 的空链接。
+          HAS_MAC=0
+          HAS_WIN=0
+          [ -f "$DMG" ] && HAS_MAC=1
+          [ -f "$EXE" ] && HAS_WIN=1
+
+          if [ "$HAS_MAC" = "1" ] && [ "$HAS_WIN" = "1" ]; then
+            TITLE="v${VERSION}"
+            TABLE_ROWS=$'| Windows x64 | `OoeoeoEngine-Setup-'"${VERSION}"$'.exe` | Double-click to install |\n| macOS Universal | `OoeoeoEngine-'"${VERSION}"$'.dmg` | Open DMG, drag to Applications |'
+          elif [ "$HAS_MAC" = "1" ]; then
+            TITLE="v${VERSION} (macOS only)"
+            TABLE_ROWS='| macOS Universal | `OoeoeoEngine-'"${VERSION}"'.dmg` | Open DMG, drag to Applications |'
+          elif [ "$HAS_WIN" = "1" ]; then
+            TITLE="v${VERSION} (Windows only)"
+            TABLE_ROWS='| Windows x64 | `OoeoeoEngine-Setup-'"${VERSION}"'.exe` | Double-click to install |'
+          else
+            echo "ERROR: 没有任何平台产物,无法创建 release"
+            exit 1
+          fi
+
+          NOTES=$(cat <<EOF
+          ## Downloads
+
+          | Platform | File | Install |
+          |----------|------|---------|
+          ${TABLE_ROWS}
+
+          ---
+          See sha256 files for checksum verification.
+          EOF
+          )
+
           # 删除已存在的同名 release（重试时）
           gh release delete "v${VERSION}" --repo ${{ github.repository }} -y 2>/dev/null || true
 
           gh release create "v${VERSION}" \
             --repo ${{ github.repository }} \
-            --title "v${VERSION}" \
-            --notes "$(cat <<EOF
-          ## Downloads
-
-          | Platform | File | Install |
-          |----------|------|---------|
-          | Windows x64 | \`OoeoeoEngine-Setup-${VERSION}.exe\` | Double-click to install |
-          | macOS Universal | \`OoeoeoEngine-${VERSION}.dmg\` | Open DMG, drag to Applications |
-
-          ---
-          See sha256 files for checksum verification.
-          EOF
-          )" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
             $ASSETS
 
       # 同步版本信息到 cloud_v1（失败不阻塞 Release）
