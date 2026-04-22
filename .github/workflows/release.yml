@@ -443,56 +443,77 @@ jobs:
             --notes "$NOTES" \
             $ASSETS
 
-      # 同步版本信息到 cloud_v1（失败不阻塞 Release）
+      # 同步版本信息到 cloud_v1
+      #
+      # 走 ops-token 通路(requirePlatformAdmin 见 cloud_v1/api/http/admin_rbac.go:42),
+      # 不走 auth/login —— ADMIN_TOKEN 本来就是给无人值守脚本准备的,省掉一次登录
+      # 且不依赖某个 admin 用户账号的可用性。
+      #
+      # 同步失败直接让整个 job 红:这一步悄悄 skip 的后果是客户端拿不到新版本
+      # downloadUrl,桌面端永远停在旧版。v1.6.8 发出去但现网 client_updates 还停
+      # 在 1.0.0 就是 continue-on-error 吞错导致的 —— 不再重复这个错误。
       - name: Sync version to cloud_v1
-        continue-on-error: true
         env:
-          CLOUD_ADMIN_EMAIL: ${{ secrets.CLOUD_ADMIN_EMAIL }}
-          CLOUD_ADMIN_PASSWORD: ${{ secrets.CLOUD_ADMIN_PASSWORD }}
+          CLOUD_ADMIN_TOKEN: ${{ secrets.CLOUD_ADMIN_TOKEN }}
           CLOUD_API_BASE: https://api.ooeoeo.com
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
 
-          MACOS_SHA256=$(cat artifacts/macos/sha256-macos.txt 2>/dev/null || echo "")
-          WINDOWS_SHA256=$(cat artifacts/windows/sha256-windows.txt 2>/dev/null || echo "")
+          if [ -z "$CLOUD_ADMIN_TOKEN" ]; then
+            echo "ERROR: CLOUD_ADMIN_TOKEN secret 未配置, 无法同步版本信息。"
+            echo "       客户端将无法看到新版本, 发版中止。"
+            exit 1
+          fi
 
           RELEASE_BASE="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
           MACOS_URL="${RELEASE_BASE}/OoeoeoEngine-${VERSION}.dmg"
           WINDOWS_URL="${RELEASE_BASE}/OoeoeoEngine-Setup-${VERSION}.exe"
 
-          if [ -z "$CLOUD_ADMIN_EMAIL" ] || [ -z "$CLOUD_ADMIN_PASSWORD" ]; then
-            echo "WARNING: CLOUD_ADMIN_EMAIL/PASSWORD not set, skipping"
-            exit 0
-          fi
+          DMG=$(find artifacts/macos -name "*.dmg" 2>/dev/null | head -1 || true)
+          EXE=$(find artifacts/windows -name "*.exe" 2>/dev/null | head -1 || true)
 
-          LOGIN_RESP=$(curl -s -X POST "${CLOUD_API_BASE}/v1/auth/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"email\": \"${CLOUD_ADMIN_EMAIL}\", \"password\": \"${CLOUD_ADMIN_PASSWORD}\"}")
+          sync_platform() {
+            local platform="$1" url="$2" sha_file="$3"
+            local sha
+            sha=$(cat "$sha_file" 2>/dev/null || echo "")
+            if [ -z "$sha" ]; then
+              echo "ERROR: ${platform} 缺少 sha256 文件: $sha_file"
+              exit 1
+            fi
 
-          TOKEN=$(echo "$LOGIN_RESP" | jq -r '.access_token // empty')
-          if [ -z "$TOKEN" ]; then
-            echo "WARNING: Admin login failed: $LOGIN_RESP"
-            exit 0
-          fi
+            local body
+            body=$(jq -cn \
+              --arg p "$platform" --arg v "$VERSION" \
+              --arg u "$url" --arg s "$sha" --arg n "v${VERSION}" \
+              '{platform:$p, latestVersion:$v, downloadUrl:$u, downloadSha256:$s, releaseNotes:$n}')
 
-          # 只同步本次实际构建的平台（artifacts 目录在前一 step 下载）
-          DMG=$(find artifacts/macos -name "*.dmg" 2>/dev/null | head -1)
-          EXE=$(find artifacts/windows -name "*.exe" 2>/dev/null | head -1)
-
-          echo "Syncing versions... DMG=$DMG EXE=$EXE"
-
-          if [ -f "$EXE" ]; then
+            echo "PUT ${platform} latestVersion=${VERSION}"
             curl -sf -X PUT "${CLOUD_API_BASE}/v1/admin/client-updates" \
-              -H "Authorization: Bearer $TOKEN" \
+              -H "Authorization: Bearer ${CLOUD_ADMIN_TOKEN}" \
               -H "Content-Type: application/json" \
-              -d "{\"platform\":\"windows\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${WINDOWS_URL}\",\"downloadSha256\":\"${WINDOWS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
-              && echo "Windows synced" || echo "Windows sync failed"
+              -d "$body" > /dev/null
+
+            # 回读校验:确认 PUT 真的生效了。没这一步等于只相信 HTTP 200,
+            # 拿不到写后结果。
+            local got
+            got=$(curl -sf "${CLOUD_API_BASE}/v1/api/client-updates?platform=${platform}&version=x" \
+              | jq -r '.latestVersion')
+            if [ "$got" != "$VERSION" ]; then
+              echo "ERROR: ${platform} 回读失败: 期望 ${VERSION}, 实际 ${got}"
+              exit 1
+            fi
+            echo "${platform} synced OK (verified latestVersion=${got})"
+          }
+
+          if [ -n "$EXE" ] && [ -f "$EXE" ]; then
+            sync_platform "windows" "$WINDOWS_URL" "artifacts/windows/sha256-windows.txt"
+          else
+            echo "Windows 本次未构建, 跳过 windows 同步"
           fi
 
-          if [ -f "$DMG" ]; then
-            curl -sf -X PUT "${CLOUD_API_BASE}/v1/admin/client-updates" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"platform\":\"macos\",\"latestVersion\":\"${VERSION}\",\"downloadUrl\":\"${MACOS_URL}\",\"downloadSha256\":\"${MACOS_SHA256}\",\"releaseNotes\":\"v${VERSION}\"}" \
-              && echo "macOS synced" || echo "macOS sync failed"
+          if [ -n "$DMG" ] && [ -f "$DMG" ]; then
+            sync_platform "macos" "$MACOS_URL" "artifacts/macos/sha256-macos.txt"
+          else
+            echo "macOS 本次未构建, 跳过 macos 同步"
           fi
