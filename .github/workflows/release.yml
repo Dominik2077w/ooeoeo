@@ -88,7 +88,7 @@ jobs:
         working-directory: ooeoeo/client/platform/desktop-windows
         shell: cmd
         run: |
-          msbuild OoeoeoEngine\OoeoeoEngine.csproj -restore -t:Publish -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:PublishDir=..\app-dist\ -p:Version=${{ steps.version.outputs.version }} -p:DisableTray=true -p:GenerateAppxPackageOnBuild=false
+          msbuild OoeoeoEngine\OoeoeoEngine.csproj -restore -t:Publish -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:PublishDir=..\app-dist\ -p:Version=${{ steps.version.outputs.version }} -p:GenerateAppxPackageOnBuild=false
 
       # 确保 WinUI 3 native DLL 在 publish 输出里
       - name: Ensure WindowsAppRuntime DLLs
