@@ -132,11 +132,15 @@ jobs:
           echo "node_built=$NODE_BUILT"
 
       # ── 解析部署 topology（来自 GitHub vars）──
-      # vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 用同一格式:
-      #   "name=host,name=host,..."
+      # vars.DEPLOY_GATEWAYS 和 vars.DEPLOY_NODES 格式:
+      #   "name=host[:variant],name=host[:variant],..."
+      # variant 可选,用于一个角色有多种 compose 变体的情况(例:gateway primary vs replica)。
+      # 省略 variant → 走该角色的默认 compose 文件(gateway.yml / node.yml)。
+      # variant=replica → 走 docker-compose.gateway-replica.yml / docker-compose.node-replica.yml
+      #
       # 例:
-      #   DEPLOY_GATEWAYS = "eu=138.199.205.71,us=1.2.3.4"
-      #   DEPLOY_NODES    = "eu-n1=178.104.129.69,eu-n2=178.104.129.70,us-n1=5.6.7.8"
+      #   DEPLOY_GATEWAYS = "eu-gw-1=178.104.198.148,eu-gw-2=178.104.129.69:replica"
+      #   DEPLOY_NODES    = "eu-n1=138.199.205.71,eu-n2=128.140.40.240"
       # 加新节点 = 改 var 加一个条目, 不需改 workflow。
       - name: Parse deploy topology
         id: topology
@@ -153,7 +157,8 @@ jobs:
             echo "$raw" | jq -Rsc '
               gsub("\\s"; "") | split(",") |
               map(select(length > 0)) |
-              map(capture("^(?<name>[^=]+)=(?<host>.+)$")) |
+              map(capture("^(?<name>[^=]+)=(?<host>[^:]+)(:(?<variant>.+))?$")) |
+              map(.variant //= "") |
               {include: .}
             '
           }
@@ -230,12 +235,16 @@ jobs:
   #
   # 通过 GitHub repo vars 动态声明所有目标 (加节点 = 改一行 var, 不改 workflow):
   #
-  #   vars.DEPLOY_GATEWAYS = "eu=138.199.205.71"
-  #   vars.DEPLOY_NODES    = "eu-n1=178.104.129.69"
+  #   vars.DEPLOY_GATEWAYS = "eu-gw-1=178.104.198.148,eu-gw-2=178.104.129.69:replica"
+  #   vars.DEPLOY_NODES    = "eu-n1=138.199.205.71,eu-n2=128.140.40.240"
+  #
+  # 格式: name=host[:variant]
+  # variant 可选 → 默认 compose (gateway.yml / node.yml)
+  # variant=replica → docker-compose.gateway-replica.yml / docker-compose.node-replica.yml
   #
   # 未来扩展示例:
-  #   vars.DEPLOY_GATEWAYS = "eu=138.199.205.71,us=1.2.3.4,ap=5.6.7.8"
-  #   vars.DEPLOY_NODES    = "eu-n1=178.104.129.69,eu-n2=178.104.129.70,us-n1=9.10.11.12"
+  #   vars.DEPLOY_GATEWAYS = "eu-gw-1=...,eu-gw-2=...:replica,us-gw-1=...,us-gw-2=...:replica"
+  #   vars.DEPLOY_NODES    = "eu-n1=...,eu-n2=...,us-n1=...,us-n2=..."
   #
   # 必需 secrets (所有机器共用 SSH 凭据):
   #   - DEPLOY_SSH_USER  全集群共用 SSH 用户 (例: root)
@@ -260,16 +269,22 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.tag }}
           NAME: ${{ matrix.name }}
           BUILT: ${{ needs.prepare.outputs.built_gateway_components }}
+          VARIANT: ${{ matrix.variant }}
         with:
           host: ${{ matrix.host }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: VERSION,NAME,BUILT
+          envs: VERSION,NAME,BUILT,VARIANT
           script: |
             set -euo pipefail
             cd /opt/ooeoeo/deploy/scaling
 
-            echo "=== [GATEWAY $NAME] Deploying $VERSION (components: $BUILT) ==="
+            if [ -z "${VARIANT:-}" ]; then
+              COMPOSE_FILE="docker-compose.gateway.yml"
+            else
+              COMPOSE_FILE="docker-compose.gateway-${VARIANT}.yml"
+            fi
+            echo "=== [GATEWAY $NAME] Deploying $VERSION (components: $BUILT, compose: $COMPOSE_FILE) ==="
 
             # service name → .env 变量名: website → OOOEOEO_WEBSITE_TAG
             to_var() {
@@ -300,10 +315,10 @@ jobs:
             done
 
             echo "--- Pulling: $BUILT ---"
-            docker compose -f docker-compose.gateway.yml pull $BUILT
+            docker compose -f "$COMPOSE_FILE" pull $BUILT
 
             echo "--- Restarting: $BUILT ---"
-            docker compose -f docker-compose.gateway.yml up -d --no-deps $BUILT
+            docker compose -f "$COMPOSE_FILE" up -d --no-deps $BUILT
 
             echo "=== [GATEWAY $NAME] Deploy $VERSION succeeded ==="
             docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E "$(echo $BUILT | tr ' ' '|')" || true
@@ -334,16 +349,22 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.tag }}
           NAME: ${{ matrix.name }}
           BUILT: ${{ needs.prepare.outputs.built_node_components }}
+          VARIANT: ${{ matrix.variant }}
         with:
           host: ${{ matrix.host }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: VERSION,NAME,BUILT
+          envs: VERSION,NAME,BUILT,VARIANT
           script: |
             set -euo pipefail
             cd /opt/ooeoeo/deploy/scaling
 
-            echo "=== [NODE $NAME] Deploying $VERSION (components: $BUILT) ==="
+            if [ -z "${VARIANT:-}" ]; then
+              COMPOSE_FILE="docker-compose.node.yml"
+            else
+              COMPOSE_FILE="docker-compose.node-${VARIANT}.yml"
+            fi
+            echo "=== [NODE $NAME] Deploying $VERSION (components: $BUILT, compose: $COMPOSE_FILE) ==="
 
             to_var() {
               local svc="$1"
@@ -370,10 +391,10 @@ jobs:
             done
 
             echo "--- Pulling: $BUILT ---"
-            docker compose -f docker-compose.node.yml pull $BUILT
+            docker compose -f "$COMPOSE_FILE" pull $BUILT
 
             echo "--- Restarting: $BUILT ---"
-            docker compose -f docker-compose.node.yml up -d --no-deps $BUILT
+            docker compose -f "$COMPOSE_FILE" up -d --no-deps $BUILT
 
             # cloud_v1 健康检查 (只在 cloud_v1 被重启时做)
             if echo " $BUILT " | grep -q " cloud_v1 "; then
@@ -381,7 +402,7 @@ jobs:
               OK=0
               for i in $(seq 1 12); do
                 sleep 5
-                if docker compose -f docker-compose.node.yml exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
+                if docker compose -f "$COMPOSE_FILE" exec -T cloud_v1 wget -q -O- http://localhost:8080/healthz >/dev/null 2>&1; then
                   OK=1
                   break
                 fi
@@ -392,8 +413,8 @@ jobs:
                 prev_cloud="${PREV_TAGS[cloud_v1]}"
                 echo "=== [NODE $NAME] HEALTH CHECK FAILED — ROLLING BACK cloud_v1 to $prev_cloud ==="
                 upsert_env "$(to_var cloud_v1)" "$prev_cloud"
-                docker compose -f docker-compose.node.yml pull cloud_v1
-                docker compose -f docker-compose.node.yml up -d --no-deps cloud_v1
+                docker compose -f "$COMPOSE_FILE" pull cloud_v1
+                docker compose -f "$COMPOSE_FILE" up -d --no-deps cloud_v1
                 echo "=== [NODE $NAME] Rollback complete ==="
                 exit 1
               fi
