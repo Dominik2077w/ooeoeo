@@ -1,0 +1,63 @@
+# Smoke 测试:连真实云跑 iOS+worker 假客户端端到端链路。
+# 每次 publish-cloud 完成后可跑一次,验证跨 node 派单 + 字幕回传在生产真通。
+# 源码从 Myjoy 私有仓库 checkout,不泄漏。
+name: Smoke Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Myjoy Git ref"
+        required: false
+        default: "main"
+      force_cross_node:
+        description: "强制跨 node (iOS→eu-n2, worker→eu-n1); 关掉让 gateway LB 随机分派"
+        required: false
+        default: "true"
+        type: boolean
+      gateway_url:
+        description: "Gateway URL (省略 = https://api.ooeoeo.com)"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [smoke-cloud]
+
+env:
+  GO_VERSION: "1.25"
+  MYJOY_REPO: Dominik2077w/Myjoy
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  smoke:
+    name: smoke cross-node dispatch
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ooeoeo/cloud_v1
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ooeoeo/cloud_v1/go.sum
+
+      - name: Run smoke test
+        env:
+          SMOKE_GATEWAY_URL: ${{ github.event.inputs.gateway_url || 'https://api.ooeoeo.com' }}
+          SMOKE_ADMIN_TOKEN: ${{ secrets.CLOUD_ADMIN_TOKEN }}
+          SMOKE_NODE_A_WS: ${{ github.event.inputs.force_cross_node == 'true' && 'wss://eu-n1.eu.ooeoeo.com/v1/ws' || '' }}
+          SMOKE_NODE_B_WS: ${{ github.event.inputs.force_cross_node == 'true' && 'wss://eu-n2.eu.ooeoeo.com/v1/ws' || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SMOKE_ADMIN_TOKEN:-}" ]; then
+            echo "::error::CLOUD_ADMIN_TOKEN secret not set"
+            exit 1
+          fi
+          echo "gateway=$SMOKE_GATEWAY_URL cross_node=${SMOKE_NODE_A_WS:+yes}"
+          go test -tags smoke -v -run TestSmokeCrossNodeDispatch ./test/smoke/... -timeout 120s
