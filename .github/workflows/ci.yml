@@ -64,6 +64,31 @@ jobs:
       - run: go test -race -timeout 120s ./...
       - run: go vet ./...
 
+  cloud_e2e:
+    name: cloud-e2e (streaming scenarios)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ooeoeo/cloud_v1
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ooeoeo/cloud_v1/go.sum
+
+      # ubuntu-latest runners 内置 Docker daemon，testcontainers-go 直接用；
+      # Testcontainers 会 pull Redis / Postgres / MinIO 镜像，首跑 ~1-2min，
+      # 后续 job 的 docker layer cache 命中 ~15s。
+      - name: Streaming e2e scenarios
+        run: go test -tags e2e -v -run TestScenario ./test/e2e/... -timeout 20m
+
   website:
     name: website
     runs-on: ubuntu-latest
