@@ -685,7 +685,7 @@ jobs:
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe qwen-translate-server.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
