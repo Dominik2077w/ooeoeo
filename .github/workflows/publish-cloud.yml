@@ -14,7 +14,7 @@ on:
       deploy:
         description: "构建后自动部署到生产？"
         required: false
-        default: "false"
+        default: "true"
         type: boolean
       components:
         description: "构建哪些组件（逗号分隔：cloud_v1,website,web-console 或 all）"
