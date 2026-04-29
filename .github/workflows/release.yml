@@ -145,7 +145,7 @@ jobs:
           # 即使上游 Build Desktop Runtime 已经加了 manifest 校验，desktop/runtime
           # tag 上的 zip 也可能是在加校验前产出的（历史污染）。此处再查一遍，
           # 缺文件直接中止发版，避免灌进 installer 推到用户电脑后才发现无法转录。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "$f" ] || missing+=("$f")
@@ -161,7 +161,7 @@ jobs:
             ls -la
             echo ""
             echo "请先跑一次 'Build Desktop Runtime' workflow（全量构建，不勾选"
-            echo "mesh_worker_only / skip_whisper）产生完整 zip 后再发版。"
+            echo "mesh_worker_only / skip_whisper / skip_llama）产生完整 zip 后再发版。"
             exit 1
           fi
           echo "Runtime manifest OK："
@@ -276,7 +276,7 @@ jobs:
 
           # ── Runtime manifest 校验（下游防线，同 Windows 端说明）──
           cd "$APP/Contents/Resources/runtime"
-          required=(whisper-server opus-mt-server mesh-worker ggml-silero-v5.1.2.bin)
+          required=(whisper-server opus-mt-server madlad-server mesh-worker ggml-silero-v5.1.2.bin)
           missing=()
           for f in "${required[@]}"; do
             [ -f "$f" ] || missing+=("$f")
