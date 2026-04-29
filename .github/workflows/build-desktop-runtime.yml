@@ -1,5 +1,5 @@
 # 构建桌面端 runtime 二进制
-# 产物：whisper-server + opus-mt-server + mesh-worker
+# 产物：whisper-server + opus-mt-server + madlad-server + llama-server + mesh-worker
 # 平台：Windows x64 (CPU/CUDA/Vulkan) + macOS Universal (Metal/CPU)
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
 #
@@ -14,6 +14,10 @@ on:
         description: "whisper.cpp Git ref (tag or commit)"
         required: false
         default: "v1.8.4"
+      llama_cpp_ref:
+        description: "llama.cpp Git ref (tag or commit)"
+        required: false
+        default: "b8977"
       upload_release:
         description: "Upload artifacts to GitHub Release"
         required: false
@@ -24,12 +28,17 @@ on:
         required: false
         default: "main"
       skip_whisper:
-        description: "跳过 whisper 构建（whisper 从上次 release 复用，仅构建 mesh-worker + opus-mt-server）"
+        description: "跳过 whisper 构建（whisper 从上次 release 复用，仅构建 mesh-worker + opus-mt-server + madlad-server + llama-server）"
+        required: false
+        default: "false"
+        type: boolean
+      skip_llama:
+        description: "跳过 llama 构建（llama 从上次 release 复用）"
         required: false
         default: "false"
         type: boolean
       mesh_worker_only:
-        description: "仅重编 mesh-worker（跳过 whisper + opus-mt 构建）"
+        description: "仅重编 mesh-worker（跳过 whisper + opus-mt + llama 构建）"
         required: false
         default: "false"
         type: boolean
@@ -38,6 +47,7 @@ on:
 
 env:
   WHISPER_CPP_REF: ${{ github.event.inputs.whisper_cpp_ref || 'v1.8.4' }}
+  LLAMA_CPP_REF: ${{ github.event.inputs.llama_cpp_ref || 'b8977' }}
   GO_VERSION: "1.25"
   PYTHON_VERSION: "3.11"
   MYJOY_REPO: Dominik2077w/Myjoy
@@ -166,6 +176,160 @@ jobs:
         with:
           name: windows-whisper-vulkan
           path: artifacts/whisper-server-vulkan.exe
+
+  # ── llama.cpp llama-server (Qwen 翻译模型 inference 后端) ──
+  # 与 whisper-server 同级部署, 桌面端按 GPU 可用性选择 CPU/CUDA/Vulkan 变体。
+  # 构建流程与 whisper 完全对称: cmake + MSBuild, 无需 patch。
+  # llama.cpp 的 server target 是 llama-server (非 whisper-server)。
+
+  windows-llama-cpu:
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_llama != 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - name: Clone llama.cpp
+        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+      - name: Build (CPU)
+        run: |
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF
+          cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "llama-server-cpu.exe not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/llama-server-cpu.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-llama-cpu
+          path: artifacts/llama-server-cpu.exe
+
+  windows-llama-cuda:
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_llama != 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.6.2"
+          method: "network"
+      - name: Clone llama.cpp
+        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+      - name: Build (CUDA)
+        run: |
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+          cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "llama-server-cuda.exe not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/llama-server-cuda.exe
+          # CUDA runtime DLLs — 与 whisper-cuda 共享同一版本。此处也导出一份,
+          # package 步骤合并时同路径文件自然 dedup (最后一份覆盖,内容相同)。
+          $cudaPath = $env:CUDA_PATH
+          if ($cudaPath) {
+            foreach ($p in @("cudart64_*.dll","cublas64_*.dll","cublasLt64_*.dll")) {
+              Get-ChildItem -Path "$cudaPath/bin" -Filter $p -EA SilentlyContinue | ForEach-Object { Copy-Item $_.FullName artifacts/ }
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-llama-cuda
+          path: artifacts/
+
+  windows-llama-vulkan:
+    if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_llama != 'true'
+    runs-on: windows-latest
+    env:
+      VULKAN_SDK_VERSION: "1.4.304.1"
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = "$env:TEMP\VulkanSDK-Installer.exe"
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/VulkanSDK-${{ env.VULKAN_SDK_VERSION }}-Installer.exe" -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
+          $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
+      - name: Clone llama.cpp
+        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+      - name: Build (Vulkan)
+        run: |
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_CURL=OFF
+          cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (-not $exe) { Write-Error "llama-server-vulkan.exe not found"; exit 1 }
+          Copy-Item $exe.FullName artifacts/llama-server-vulkan.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-llama-vulkan
+          path: artifacts/llama-server-vulkan.exe
+
+  # ── qwen-translate-server (Qwen 翻译编排层) ──
+  # PyInstaller 打包, 与 opus-mt-server / madlad-server 同级部署。
+  # 源文件: ooeoeo/client/platform/qwen-translate-server/
+  # TODO: 源文件 (qwen_translate_server.py, qwen_translate_server.spec, requirements.txt)
+  #       尚未创建。创建后本 job 自动生效。
+  windows-qwen-translate-server:
+    if: github.event.inputs.mesh_worker_only != 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Check source exists
+        shell: bash
+        run: |
+          DIR="ooeoeo/client/platform/qwen-translate-server"
+          if [ ! -f "$DIR/qwen_translate_server.py" ]; then
+            echo "WARNING: qwen_translate_server.py 尚未创建, 跳过构建。"
+            echo "        源文件就绪后本 job 自动生效, 无需修改 workflow。"
+            echo "SKIP_QWEN=true" >> $GITHUB_ENV
+          else
+            echo "SKIP_QWEN=false" >> $GITHUB_ENV
+          fi
+      - name: Install deps
+        if: env.SKIP_QWEN != 'true'
+        run: pip install -r ooeoeo/client/platform/qwen-translate-server/requirements.txt
+      - name: Build
+        if: env.SKIP_QWEN != 'true'
+        working-directory: ooeoeo/client/platform/qwen-translate-server
+        run: pyinstaller qwen_translate_server.spec --noconfirm
+      - uses: actions/upload-artifact@v4
+        if: env.SKIP_QWEN != 'true'
+        with:
+          name: windows-qwen-translate-server
+          path: ooeoeo/client/platform/qwen-translate-server/dist/qwen-translate-server.exe
 
   windows-opus-mt-server:
     if: github.event.inputs.mesh_worker_only != 'true'
@@ -403,19 +567,20 @@ jobs:
           path: artifacts/ggml-silero-v5.1.2.bin
 
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-madlad-server, windows-mesh-worker, macos-whisper, macos-opus-mt-server, macos-madlad-server, macos-mesh-worker, silero-vad-model]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-madlad-server, windows-mesh-worker, windows-llama-cpu, windows-llama-cuda, windows-llama-vulkan, windows-qwen-translate-server, macos-whisper, macos-opus-mt-server, macos-madlad-server, macos-mesh-worker, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MESH_WORKER_ONLY: ${{ github.event.inputs.mesh_worker_only }}
       SKIP_WHISPER: ${{ github.event.inputs.skip_whisper }}
+      SKIP_LLAMA: ${{ github.event.inputs.skip_llama }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: all-artifacts
 
-      # skip_whisper / mesh_worker_only 模式：从现有 release 下载 whisper 二进制复用。
+      # skip_whisper / skip_llama / mesh_worker_only 模式：从现有 release 下载对应二进制复用。
       #
       # 历史坑（2026-04-19,和 release.yml 同类）: 之前查 `/releases` endpoint 然后 jq 过滤
       # startswith("desktop/"), 但 /releases 默认 per_page=30, 每发一版 v1.x.x 都会把
@@ -423,14 +588,14 @@ jobs:
       # 下面 if 被跳过, existing-win 目录是空的, 后面 cp 失败。
       # 现在改成直接按 tag 查 /releases/tags/desktop%2Fruntime（O(1),无分页问题）,
       # 且 URL 空时 fail-fast —— reuse 模式前提就是 existing release 可用,缺就没得 reuse。
-      - name: Download existing runtime (reuse whisper)
-        if: env.MESH_WORKER_ONLY == 'true' || env.SKIP_WHISPER == 'true'
+      - name: Download existing runtime (reuse whisper/llama)
+        if: env.MESH_WORKER_ONLY == 'true' || env.SKIP_WHISPER == 'true' || env.SKIP_LLAMA == 'true'
         run: |
           WIN_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
             --jq '.assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
           if [ -z "$WIN_URL" ]; then
-            echo "ERROR: desktop/runtime release 不存在或缺 runtime-windows-x64.zip, 无法 reuse whisper。"
-            echo "       先跑一次全量 Build Desktop Runtime（不勾 mesh_worker_only / skip_whisper）填充 desktop/runtime tag。"
+            echo "ERROR: desktop/runtime release 不存在或缺 runtime-windows-x64.zip, 无法 reuse whisper/llama。"
+            echo "       先跑一次全量 Build Desktop Runtime（不勾 mesh_worker_only / skip_whisper / skip_llama）填充 desktop/runtime tag。"
             exit 1
           fi
           echo "下载现有 Windows runtime: $WIN_URL"
@@ -452,7 +617,10 @@ jobs:
           mkdir -p windows-runtime
           REUSE_WHISPER="${MESH_WORKER_ONLY:-false}"
           [ "$SKIP_WHISPER" = "true" ] && REUSE_WHISPER="true"
+          REUSE_LLAMA="${MESH_WORKER_ONLY:-false}"
+          [ "$SKIP_LLAMA" = "true" ] && REUSE_LLAMA="true"
 
+          # ─ whisper / silero VAD / CUDA DLLs ─
           if [ "$REUSE_WHISPER" = "true" ]; then
             # 从现有 release 复用 whisper + silero VAD + CUDA 运行库。
             # 历史坑：此处曾用 `cp ... 2>/dev/null || true` 静默吞错，
@@ -478,7 +646,22 @@ jobs:
             cp all-artifacts/windows-whisper-vulkan/whisper-server-vulkan.exe windows-runtime/
             cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin windows-runtime/
           fi
-          # opus-mt-server / madlad-server: 新构建或复用 (严格, 缺就 fail)
+
+          # ─ llama-server ─
+          if [ "$REUSE_LLAMA" = "true" ]; then
+            # 从现有 release 复用 llama-server 三变体。
+            # 严格 cp：源文件缺一个立刻 fail。首次发版必须先跑全量 build。
+            for f in llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe; do
+              cp "existing-win/$f" windows-runtime/
+            done
+          else
+            cp all-artifacts/windows-llama-cpu/llama-server-cpu.exe windows-runtime/
+            cp all-artifacts/windows-llama-cuda/* windows-runtime/ 2>/dev/null || true
+            cp all-artifacts/windows-llama-vulkan/llama-server-vulkan.exe windows-runtime/
+          fi
+
+          # ─ opus-mt-server / madlad-server ─
+          # 新构建或复用 (严格, 缺就 fail)
           # MADLAD 是本期新增,老的 runtime tag 不含 madlad-server.exe, reuse 会直接失败 ——
           # 这是故意的: mesh_worker_only 模式发版前必须先跑一次全量 build, 把 madlad 录进去。
           if [ "$MESH_WORKER_ONLY" = "true" ]; then
@@ -488,12 +671,21 @@ jobs:
             cp all-artifacts/windows-opus-mt-server/opus-mt-server.exe windows-runtime/
             cp all-artifacts/windows-madlad-server/madlad-server.exe windows-runtime/
           fi
+
+          # ─ qwen-translate-server ─
+          # 源文件尚未创建, 构建 job 自动跳过; 此处仅当 artifact 存在才复制。
+          if [ -f "all-artifacts/windows-qwen-translate-server/qwen-translate-server.exe" ]; then
+            cp all-artifacts/windows-qwen-translate-server/qwen-translate-server.exe windows-runtime/
+          elif [ "$MESH_WORKER_ONLY" = "true" ] && [ -f "existing-win/qwen-translate-server.exe" ]; then
+            cp existing-win/qwen-translate-server.exe windows-runtime/
+          fi
+
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
 
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
@@ -592,6 +784,6 @@ jobs:
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
             --title "Desktop Runtime $TAG" \
-            --notes "Runtime binaries (whisper-server, opus-mt-server, mesh-worker) for desktop engine." \
+            --notes "Runtime binaries (whisper-server, opus-mt-server, madlad-server, llama-server, mesh-worker) for desktop engine." \
             release-artifacts/runtime-windows-x64/runtime-windows-x64.zip \
             release-artifacts/runtime-macos-universal/runtime-macos-universal.zip
