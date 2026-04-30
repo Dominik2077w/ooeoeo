@@ -150,7 +150,7 @@ jobs:
           for f in "${required[@]}"; do
             [ -f "$f" ] || missing+=("$f")
           done
-          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
             compgen -G "$pattern" >/dev/null || missing+=("$pattern")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
