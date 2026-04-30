@@ -205,10 +205,13 @@ jobs:
           $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
           if (-not $exe) { Write-Error "llama-server-cpu.exe not found"; exit 1 }
           Copy-Item $exe.FullName artifacts/llama-server-cpu.exe
+          # Copy ggml DLLs from the same directory as the exe
+          $exeDir = Split-Path -Parent $exe.FullName
+          Get-ChildItem -Path $exeDir -Filter "ggml*.dll" | ForEach-Object { Copy-Item $_.FullName artifacts/ }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-llama-cpu
-          path: artifacts/llama-server-cpu.exe
+          path: artifacts/
 
   windows-llama-cuda:
     if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_llama != 'true'
@@ -237,6 +240,9 @@ jobs:
           $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
           if (-not $exe) { Write-Error "llama-server-cuda.exe not found"; exit 1 }
           Copy-Item $exe.FullName artifacts/llama-server-cuda.exe
+          # Copy ggml DLLs from the same directory as the exe
+          $exeDir = Split-Path -Parent $exe.FullName
+          Get-ChildItem -Path $exeDir -Filter "ggml*.dll" | ForEach-Object { Copy-Item $_.FullName artifacts/ }
           # CUDA runtime DLLs — 与 whisper-cuda 共享同一版本。此处也导出一份,
           # package 步骤合并时同路径文件自然 dedup (最后一份覆盖,内容相同)。
           $cudaPath = $env:CUDA_PATH
@@ -284,10 +290,13 @@ jobs:
           $exe = Get-ChildItem -Recurse -Path llama-cpp/build -Include "llama-server.exe" -File | Where-Object { $_.DirectoryName -notmatch 'CMakeFiles' } | Select-Object -First 1
           if (-not $exe) { Write-Error "llama-server-vulkan.exe not found"; exit 1 }
           Copy-Item $exe.FullName artifacts/llama-server-vulkan.exe
+          # Copy ggml DLLs from the same directory as the exe
+          $exeDir = Split-Path -Parent $exe.FullName
+          Get-ChildItem -Path $exeDir -Filter "ggml*.dll" | ForEach-Object { Copy-Item $_.FullName artifacts/ }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-llama-vulkan
-          path: artifacts/llama-server-vulkan.exe
+          path: artifacts/
 
   # ── qwen-translate-server (Qwen 翻译编排层) ──
   # PyInstaller 打包, 与 opus-mt-server / madlad-server 同级部署。
@@ -632,7 +641,7 @@ jobs:
               cp "existing-win/$f" windows-runtime/
             done
             # CUDA 运行库 DLL 带版本号需 glob 展开；每个 pattern 至少一个匹配
-            for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+            for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
               if ! compgen -G "existing-win/$pattern" >/dev/null; then
                 echo "ERROR: existing-win/ 缺 $pattern，无法复用 whisper-cuda。"
                 ls -la existing-win/
@@ -690,7 +699,7 @@ jobs:
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
           done
-          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
             compgen -G "windows-runtime/$pattern" >/dev/null || missing+=("$pattern")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
