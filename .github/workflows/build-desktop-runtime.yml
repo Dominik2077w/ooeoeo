@@ -200,7 +200,7 @@ jobs:
           git checkout FETCH_HEAD
       - name: Build (CPU)
         run: |
-          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF
           cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
@@ -239,7 +239,7 @@ jobs:
           git checkout FETCH_HEAD
       - name: Build (CUDA)
         run: |
-          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF
           cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
@@ -293,7 +293,7 @@ jobs:
           git checkout FETCH_HEAD
       - name: Build (Vulkan)
         run: |
-          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DLLAMA_CURL=OFF
+          cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF
           cmake --build llama-cpp/build --config Release --target llama-server -j $env:NUMBER_OF_PROCESSORS
       - name: Collect
         shell: pwsh
