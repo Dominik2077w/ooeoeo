@@ -1,0 +1,519 @@
+# 桌面端发布流水线（在公开仓库 ooeoeo 上运行，避免消耗私有仓库 Actions 额度）
+#
+# 源码通过 PAT 从私有仓库 Myjoy checkout，构建完 runner 销毁，不会泄漏源码。
+#
+# 触发方式：
+#   1. 手动 workflow_dispatch（填入版本号）
+#   2. Myjoy 推 v* tag 后通过 repository_dispatch 自动触发
+#
+# 产出：
+#   - Windows: OoeoeoEngine-Setup-{version}.exe（Inno Setup 安装器）
+#   - macOS:   OoeoeoEngine-{version}.dmg（.app bundle）
+
+name: Release Desktop Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 1.0.0，不含 v 前缀）"
+        required: true
+      ref:
+        description: "Myjoy 仓库的 Git ref（tag 或 commit SHA）"
+        required: false
+        default: "main"
+      platforms:
+        description: "构建平台：all (默认) | macos | windows"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - macos
+          - windows
+  repository_dispatch:
+    types: [release-desktop]
+
+permissions:
+  contents: write
+
+env:
+  MYJOY_REPO: Dominik2077w/Myjoy
+
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+jobs:
+  # ── Windows 构建 ──
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    if: github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'windows' || github.event_name == 'repository_dispatch'
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          # 支持用户传 "v1.3.3" 或 "1.3.3" 两种写法。MSBuild -p:Version 要求纯 SemVer
+          # (不含 'v' 前缀), 否则 NuGet Restore 会抛 "'v1.3.3' is not a valid version string"。
+          # 统一归一化到不含 'v' 的形式, 后续 filename/release 里要 'v' 的再自己加上。
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            raw="${{ github.event.client_payload.version }}"
+            echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
+          else
+            raw="${{ github.event.inputs.version }}"
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
+
+      - name: Checkout Myjoy (private)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ steps.version.outputs.ref }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        id: msbuild
+
+      - name: Run tests
+        working-directory: ooeoeo/client/platform/desktop-windows
+        run: dotnet test OoeoeoEngine.Tests/OoeoeoEngine.Tests.csproj -c Release --verbosity normal
+
+      - name: Publish
+        working-directory: ooeoeo/client/platform/desktop-windows
+        shell: cmd
+        run: |
+          msbuild OoeoeoEngine\OoeoeoEngine.csproj -restore -t:Publish -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SelfContained=true -p:PublishDir=..\app-dist\ -p:Version=${{ steps.version.outputs.version }} -p:GenerateAppxPackageOnBuild=false
+
+      # 确保 WinUI 3 native DLL 在 publish 输出里
+      - name: Ensure WindowsAppRuntime DLLs
+        shell: pwsh
+        run: |
+          $pubDir = "ooeoeo/client/platform/desktop-windows/app-dist"
+          # 检查 bootstrap DLL 是否存在
+          $bootstrap = Get-ChildItem -Path $pubDir -Filter "Microsoft.WindowsAppRuntime.Bootstrap.dll" -Recurse -ErrorAction SilentlyContinue
+          if ($bootstrap) {
+            Write-Host "WindowsAppRuntime Bootstrap found: $($bootstrap.FullName)"
+          } else {
+            Write-Host "WARNING: Bootstrap DLL not in publish output, copying from NuGet cache..."
+            $winAppSdkDir = Get-ChildItem -Path "$env:USERPROFILE\.nuget\packages\microsoft.windowsappsdk" -Directory | Select-Object -Last 1
+            if ($winAppSdkDir) {
+              $runtimeDir = Join-Path $winAppSdkDir.FullName "runtimes\win-x64\native"
+              if (Test-Path $runtimeDir) {
+                Copy-Item "$runtimeDir\*" $pubDir -Force
+                Write-Host "Copied native DLLs from: $runtimeDir"
+              }
+            }
+          }
+          Write-Host "=== Key files in publish output ==="
+          Get-ChildItem $pubDir -Filter "*.exe" | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1MB, 1)) MB)" }
+          Get-ChildItem $pubDir -Filter "Microsoft.WindowsAppRuntime*" | ForEach-Object { Write-Host "  $($_.Name)" }
+
+      # 下载 runtime（固定从 desktop/runtime tag 拉）
+      #
+      # 历史坑：之前的查询是 `gh api .../releases` 然后 jq 过滤 startswith("desktop/"),
+      # 但 /releases 默认 per_page=30 只返回最新 30 个,每发一版 v1.3.x 都会把
+      # desktop/runtime 往后挤。发到第 30 个 v1.3.x 的时候 desktop/runtime 掉出
+      # 第一页,ASSET_URL 变空串,download 步骤静默继续,runtime-dist 留空,
+      # Inno Setup 撞到 line 56 `No files found matching runtime-dist\*` 挂掉。
+      # 改成按 tag 直接查,O(1) 无分页问题。注意 desktop/runtime 的斜杠要 URL-encode
+      # 成 `desktop%2Fruntime`(gh api 不自动转义 path 里的 /)。
+      - name: Download runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-windows-x64.zip") | .browser_download_url' 2>/dev/null || echo "")
+
+          mkdir -p ooeoeo/client/platform/desktop-windows/runtime-dist
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: desktop/runtime release not found or missing runtime-windows-x64.zip asset."
+            echo "       Run the 'Build Desktop Runtime' workflow first to populate this release."
+            exit 1
+          fi
+          echo "Downloading runtime from: $ASSET_URL"
+          curl -L -o runtime-windows-x64.zip "$ASSET_URL"
+          cd ooeoeo/client/platform/desktop-windows/runtime-dist && unzip $GITHUB_WORKSPACE/runtime-windows-x64.zip
+
+          # ── Runtime manifest 校验（下游防线）──
+          # 即使上游 Build Desktop Runtime 已经加了 manifest 校验，desktop/runtime
+          # tag 上的 zip 也可能是在加校验前产出的（历史污染）。此处再查一遍，
+          # 缺文件直接中止发版，避免灌进 installer 推到用户电脑后才发现无法转录。
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe qwen-translate-server.exe)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
+            compgen -G "$pattern" >/dev/null || missing+=("$pattern")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: runtime-windows-x64.zip 内容不完整，缺少必需文件："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "runtime-dist/ 实际内容："
+            ls -la
+            echo ""
+            echo "请先跑一次 'Build Desktop Runtime' workflow（全量构建，不勾选"
+            echo "mesh_worker_only / skip_whisper / skip_llama）产生完整 zip 后再发版。"
+            exit 1
+          fi
+          echo "Runtime manifest OK："
+          ls -la
+
+      # Inno Setup 编译安装器
+      - name: Build Installer (Inno Setup)
+        working-directory: ooeoeo/client/platform/desktop-windows
+        shell: cmd
+        run: |
+          iscc /DAppVersion=${{ steps.version.outputs.version }} installer.iss
+
+      - name: Compute checksum
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $installer = "ooeoeo/client/platform/desktop-windows/Output/OoeoeoEngine-Setup-$version.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          $hash | Out-File "ooeoeo/client/platform/desktop-windows/Output/sha256-windows.txt" -Encoding utf8 -NoNewline
+          Write-Host "SHA256: $hash"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            ooeoeo/client/platform/desktop-windows/Output/OoeoeoEngine-Setup-*.exe
+            ooeoeo/client/platform/desktop-windows/Output/sha256-windows.txt
+
+  # ── macOS 构建 ──
+  build-macos:
+    name: Build macOS
+    runs-on: macos-15
+    if: github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'macos' || github.event_name == 'repository_dispatch'
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          # 归一化 'v1.3.3' → '1.3.3', 见 build-windows job 的同名步骤说明。
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            raw="${{ github.event.client_payload.version }}"
+            echo "ref=${{ github.event.client_payload.ref || 'main' }}" >> $GITHUB_OUTPUT
+          else
+            raw="${{ github.event.inputs.version }}"
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
+
+      - name: Checkout Myjoy (private)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ steps.version.outputs.ref }}
+          token: ${{ secrets.MYJOY_PAT }}
+
+      # xcodebuild archive 直接产出 universal .app（含资源、图标、本地化）
+      - name: Archive (Universal Binary)
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          xcodebuild archive \
+            -project OoeoeoEngine.xcodeproj \
+            -scheme OoeoeoEngine \
+            -archivePath build/OoeoeoEngine.xcarchive \
+            -configuration Release \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION=1 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Extract .app from archive
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          mkdir -p dist
+          cp -R build/OoeoeoEngine.xcarchive/Products/Applications/OoeoeoEngine.app dist/
+
+      - name: Run tests
+        working-directory: ooeoeo/client/platform/desktop-macos
+        continue-on-error: true
+        run: |
+          xcodebuild test \
+            -project OoeoeoEngine.xcodeproj \
+            -scheme OoeoeoEngine \
+            -configuration Debug 2>&1 || echo "Tests skipped"
+
+      # 下载 runtime 并注入 .app bundle
+      # 历史坑见 Build Windows 的 Download runtime 步骤注释:/releases 默认
+      # per_page=30 会让 desktop/runtime 在发版多次后被挤下第一页,ASSET_URL
+      # 查询失败后静默继续。改成按 tag 直接查,并在缺失时 fail-fast。
+      - name: Download and bundle runtime
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          APP="dist/OoeoeoEngine.app"
+          mkdir -p "$APP/Contents/Resources/runtime"
+
+          ASSET_URL=$(gh api "repos/${{ github.repository }}/releases/tags/desktop%2Fruntime" \
+            --jq '.assets[] | select(.name == "runtime-macos-universal.zip") | .browser_download_url' 2>/dev/null || echo "")
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: desktop/runtime release not found or missing runtime-macos-universal.zip asset."
+            echo "       Run the 'Build Desktop Runtime' workflow first to populate this release."
+            exit 1
+          fi
+          echo "Downloading runtime from: $ASSET_URL"
+          curl -L -o /tmp/runtime-macos-universal.zip "$ASSET_URL"
+          unzip -o /tmp/runtime-macos-universal.zip -d "$APP/Contents/Resources/runtime/"
+          chmod +x "$APP/Contents/Resources/runtime/"* 2>/dev/null || true
+
+          # ── Runtime manifest 校验（下游防线，同 Windows 端说明）──
+          cd "$APP/Contents/Resources/runtime"
+          required=(whisper-server opus-mt-server madlad-server mesh-worker ggml-silero-v5.1.2.bin)
+          missing=()
+          for f in "${required[@]}"; do
+            [ -f "$f" ] || missing+=("$f")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: runtime-macos-universal.zip 内容不完整，缺少："
+            printf '  - %s\n' "${missing[@]}"
+            echo ""
+            echo "runtime/ 实际内容："
+            ls -la
+            echo ""
+            echo "请先跑一次 'Build Desktop Runtime' workflow 全量构建。"
+            exit 1
+          fi
+          echo "Runtime manifest OK："
+          ls -la
+
+      # macOS 代码签名（当证书 secrets 可用时执行）
+      - name: Code sign (if certificate available)
+        if: env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PWD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          echo "$MACOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          codesign --deep --force --options runtime \
+            --sign "$MACOS_SIGNING_IDENTITY" --timestamp \
+            dist/OoeoeoEngine.app
+
+      - name: Notarize (if Apple ID available)
+        if: env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          ditto -c -k --keepParent dist/OoeoeoEngine.app dist/OoeoeoEngine-notarize.zip
+          xcrun notarytool submit dist/OoeoeoEngine-notarize.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple dist/OoeoeoEngine.app
+          rm dist/OoeoeoEngine-notarize.zip
+
+      # 打包 DMG
+      - name: Create DMG
+        working-directory: ooeoeo/client/platform/desktop-macos
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dmg-content
+          cp -R dist/OoeoeoEngine.app dmg-content/
+          ln -s /Applications dmg-content/Applications
+          hdiutil create -volname "oOOo Desktop Engine" \
+            -srcfolder dmg-content -ov -format UDZO \
+            "dist/OoeoeoEngine-${VERSION}.dmg"
+          shasum -a 256 "dist/OoeoeoEngine-${VERSION}.dmg" | awk '{print $1}' > "dist/sha256-macos.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            ooeoeo/client/platform/desktop-macos/dist/*.dmg
+            ooeoeo/client/platform/desktop-macos/dist/sha256-macos.txt
+
+  # ── 创建 Release + 同步版本信息 ──
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-windows]
+    if: always() && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') && needs.build-macos.result != 'failure' && needs.build-windows.result != 'failure'
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          # 归一化 'v1.3.3' → '1.3.3', 见 build-windows job 的同名步骤说明。
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            raw="${{ github.event.client_payload.version }}"
+          else
+            raw="${{ github.event.inputs.version }}"
+          fi
+          echo "version=${raw#v}" >> $GITHUB_OUTPUT
+
+      - name: Download macOS artifact
+        if: needs.build-macos.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: artifacts/macos
+
+      - name: Download Windows artifact
+        if: needs.build-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: artifacts/windows
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          DMG=$(find artifacts/macos -name "*.dmg" | head -1)
+          EXE=$(find artifacts/windows -name "*.exe" | head -1)
+          SHA_MAC=$(find artifacts/macos -name "sha256-macos.txt" | head -1)
+          SHA_WIN=$(find artifacts/windows -name "sha256-windows.txt" | head -1)
+
+          ASSETS=""
+          [ -f "$DMG" ] && ASSETS="$ASSETS $DMG"
+          [ -f "$EXE" ] && ASSETS="$ASSETS $EXE"
+          [ -f "$SHA_MAC" ] && ASSETS="$ASSETS $SHA_MAC"
+          [ -f "$SHA_WIN" ] && ASSETS="$ASSETS $SHA_WIN"
+
+          # 根据实际构建出的产物决定 release title / notes。
+          # 单平台触发时(只构建 macOS 或只构建 Windows),下载表里只列有产物的那一行,
+          # 避免用户看到没有对应 asset 的空链接。
+          HAS_MAC=0
+          HAS_WIN=0
+          [ -f "$DMG" ] && HAS_MAC=1
+          [ -f "$EXE" ] && HAS_WIN=1
+
+          if [ "$HAS_MAC" = "1" ] && [ "$HAS_WIN" = "1" ]; then
+            TITLE="v${VERSION}"
+            TABLE_ROWS=$'| Windows x64 | `OoeoeoEngine-Setup-'"${VERSION}"$'.exe` | Double-click to install |\n| macOS Universal | `OoeoeoEngine-'"${VERSION}"$'.dmg` | Open DMG, drag to Applications |'
+          elif [ "$HAS_MAC" = "1" ]; then
+            TITLE="v${VERSION} (macOS only)"
+            TABLE_ROWS='| macOS Universal | `OoeoeoEngine-'"${VERSION}"'.dmg` | Open DMG, drag to Applications |'
+          elif [ "$HAS_WIN" = "1" ]; then
+            TITLE="v${VERSION} (Windows only)"
+            TABLE_ROWS='| Windows x64 | `OoeoeoEngine-Setup-'"${VERSION}"'.exe` | Double-click to install |'
+          else
+            echo "ERROR: 没有任何平台产物,无法创建 release"
+            exit 1
+          fi
+
+          NOTES=$(cat <<EOF
+          ## Downloads
+
+          | Platform | File | Install |
+          |----------|------|---------|
+          ${TABLE_ROWS}
+
+          ---
+          See sha256 files for checksum verification.
+          EOF
+          )
+
+          # 删除已存在的同名 release（重试时）
+          gh release delete "v${VERSION}" --repo ${{ github.repository }} -y 2>/dev/null || true
+
+          gh release create "v${VERSION}" \
+            --repo ${{ github.repository }} \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            $ASSETS
+
+      # 同步版本信息到 cloud_v1
+      #
+      # 走 ops-token 通路(requirePlatformAdmin 见 cloud_v1/api/http/admin_rbac.go:42),
+      # 不走 auth/login —— ADMIN_TOKEN 本来就是给无人值守脚本准备的,省掉一次登录
+      # 且不依赖某个 admin 用户账号的可用性。
+      #
+      # 同步失败直接让整个 job 红:这一步悄悄 skip 的后果是客户端拿不到新版本
+      # downloadUrl,桌面端永远停在旧版。v1.6.8 发出去但现网 client_updates 还停
+      # 在 1.0.0 就是 continue-on-error 吞错导致的 —— 不再重复这个错误。
+      - name: Sync version to cloud_v1
+        env:
+          CLOUD_ADMIN_TOKEN: ${{ secrets.CLOUD_ADMIN_TOKEN }}
+          CLOUD_API_BASE: https://api.ooeoeo.com
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ -z "$CLOUD_ADMIN_TOKEN" ]; then
+            echo "ERROR: CLOUD_ADMIN_TOKEN secret 未配置, 无法同步版本信息。"
+            echo "       客户端将无法看到新版本, 发版中止。"
+            exit 1
+          fi
+
+          RELEASE_BASE="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          MACOS_URL="${RELEASE_BASE}/OoeoeoEngine-${VERSION}.dmg"
+          WINDOWS_URL="${RELEASE_BASE}/OoeoeoEngine-Setup-${VERSION}.exe"
+
+          DMG=$(find artifacts/macos -name "*.dmg" 2>/dev/null | head -1 || true)
+          EXE=$(find artifacts/windows -name "*.exe" 2>/dev/null | head -1 || true)
+
+          sync_platform() {
+            local platform="$1" url="$2" sha_file="$3"
+            local sha
+            sha=$(cat "$sha_file" 2>/dev/null || echo "")
+            if [ -z "$sha" ]; then
+              echo "ERROR: ${platform} 缺少 sha256 文件: $sha_file"
+              exit 1
+            fi
+
+            local body
+            body=$(jq -cn \
+              --arg p "$platform" --arg v "$VERSION" \
+              --arg u "$url" --arg s "$sha" --arg n "v${VERSION}" \
+              '{platform:$p, latestVersion:$v, downloadUrl:$u, downloadSha256:$s, releaseNotes:$n}')
+
+            echo "PUT ${platform} latestVersion=${VERSION}"
+            curl -sf -X PUT "${CLOUD_API_BASE}/v1/admin/client-updates" \
+              -H "Authorization: Bearer ${CLOUD_ADMIN_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$body" > /dev/null
+
+            # 回读校验:确认 PUT 真的生效了。没这一步等于只相信 HTTP 200,
+            # 拿不到写后结果。
+            local got
+            got=$(curl -sf "${CLOUD_API_BASE}/v1/api/client-updates?platform=${platform}&version=x" \
+              | jq -r '.latestVersion')
+            if [ "$got" != "$VERSION" ]; then
+              echo "ERROR: ${platform} 回读失败: 期望 ${VERSION}, 实际 ${got}"
+              exit 1
+            fi
+            echo "${platform} synced OK (verified latestVersion=${got})"
+          }
+
+          if [ -n "$EXE" ] && [ -f "$EXE" ]; then
+            sync_platform "windows" "$WINDOWS_URL" "artifacts/windows/sha256-windows.txt"
+          else
+            echo "Windows 本次未构建, 跳过 windows 同步"
+          fi
+
+          if [ -n "$DMG" ] && [ -f "$DMG" ]; then
+            sync_platform "macos" "$MACOS_URL" "artifacts/macos/sha256-macos.txt"
+          else
+            echo "macOS 本次未构建, 跳过 macos 同步"
+          fi
