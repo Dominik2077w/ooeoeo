@@ -17,7 +17,7 @@ on:
       llama_cpp_ref:
         description: "llama.cpp Git ref (tag or commit)"
         required: false
-        default: "aab68217b7bd8907135dd41fbb5bcb85fca06045"
+        default: "b8994"
       upload_release:
         description: "Upload artifacts to GitHub Release"
         required: false
@@ -193,7 +193,11 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.MYJOY_PAT }}
       - name: Clone llama.cpp
-        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama-cpp
+          cd llama-cpp
+          git fetch --depth 1 origin ${{ env.LLAMA_CPP_REF }}
+          git checkout FETCH_HEAD
       - name: Build (CPU)
         run: |
           cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF
@@ -228,7 +232,11 @@ jobs:
           cuda: "12.6.2"
           method: "network"
       - name: Clone llama.cpp
-        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama-cpp
+          cd llama-cpp
+          git fetch --depth 1 origin ${{ env.LLAMA_CPP_REF }}
+          git checkout FETCH_HEAD
       - name: Build (CUDA)
         run: |
           cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DLLAMA_CURL=OFF
@@ -278,7 +286,11 @@ jobs:
           echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
           echo "$sdkPath\Bin" >> $env:GITHUB_PATH
       - name: Clone llama.cpp
-        run: git clone --depth 1 --branch ${{ env.LLAMA_CPP_REF }} https://github.com/ggerganov/llama.cpp.git llama-cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama-cpp
+          cd llama-cpp
+          git fetch --depth 1 origin ${{ env.LLAMA_CPP_REF }}
+          git checkout FETCH_HEAD
       - name: Build (Vulkan)
         run: |
           cmake -S llama-cpp -B llama-cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DLLAMA_CURL=OFF
