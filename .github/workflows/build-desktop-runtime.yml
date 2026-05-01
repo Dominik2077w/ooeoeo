@@ -17,7 +17,7 @@ on:
       llama_cpp_ref:
         description: "llama.cpp Git ref (tag or commit)"
         required: false
-        default: "b8994"
+        default: "c3c15053925746c74fc2aaf6b864bd66665393c4"
       upload_release:
         description: "Upload artifacts to GitHub Release"
         required: false
@@ -47,7 +47,7 @@ on:
 
 env:
   WHISPER_CPP_REF: ${{ github.event.inputs.whisper_cpp_ref || 'v1.8.4' }}
-  LLAMA_CPP_REF: ${{ github.event.inputs.llama_cpp_ref || 'b8977' }}
+  LLAMA_CPP_REF: ${{ github.event.inputs.llama_cpp_ref || 'c3c15053925746c74fc2aaf6b864bd66665393c4' }}
   GO_VERSION: "1.25"
   PYTHON_VERSION: "3.11"
   MYJOY_REPO: Dominik2077w/Myjoy
@@ -102,7 +102,7 @@ jobs:
           token: ${{ secrets.MYJOY_PAT }}
       - uses: Jimver/cuda-toolkit@v0.2.19
         with:
-          cuda: "12.6.2"
+          cuda: "12.8.0"
           method: "network"
       - name: Clone whisper.cpp
         run: git clone --depth 1 --branch ${{ env.WHISPER_CPP_REF }} https://github.com/ggerganov/whisper.cpp.git whisper-cpp
@@ -229,7 +229,7 @@ jobs:
           token: ${{ secrets.MYJOY_PAT }}
       - uses: Jimver/cuda-toolkit@v0.2.19
         with:
-          cuda: "12.6.2"
+          cuda: "12.8.0"
           method: "network"
       - name: Clone llama.cpp
         run: |
@@ -703,6 +703,19 @@ jobs:
 
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
 
+          # ── 整理 CUDA DLL 到 cuda/ 子目录 ──
+          # whisper-server / llama-server 的静态链接版本会通过 ggml 后端自动发现
+          # 机制加载同目录的 DLL, 若 CUDA DLL 与 CPU 二进制同目录, 在不支持 CUDA 或
+          # GPU 架构不兼容的机器上 CPU 二进制也会崩溃 (GGML uncaught_exception)。
+          # 将 CUDA DLL 放入 cuda/ 子目录, 桌面引擎 InferenceManager 启动 CUDA 变体时
+          # 会把此目录加入子进程 PATH, Windows DLL 解析从 PATH 查找 CUDA runtime。
+          mkdir -p windows-runtime/cuda
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+            for f in windows-runtime/$pattern; do
+              if [ -f "$f" ]; then mv "$f" windows-runtime/cuda/; fi
+            done
+          done
+
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
@@ -711,8 +724,9 @@ jobs:
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
           done
+          # CUDA DLL 现在位于 cuda/ 子目录
           for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
-            compgen -G "windows-runtime/$pattern" >/dev/null || missing+=("$pattern")
+            compgen -G "windows-runtime/cuda/$pattern" >/dev/null || missing+=("cuda/$pattern")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "ERROR: Windows runtime manifest 校验失败，缺少："
@@ -720,10 +734,12 @@ jobs:
             echo ""
             echo "windows-runtime/ 实际内容："
             ls -la windows-runtime/
+            ls -la windows-runtime/cuda/ 2>/dev/null || true
             exit 1
           fi
           echo "Windows runtime manifest OK："
           ls -la windows-runtime/
+          ls -la windows-runtime/cuda/ 2>/dev/null || true
 
           cd windows-runtime && zip -r ../runtime-windows-x64.zip .
 
