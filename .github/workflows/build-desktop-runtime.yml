@@ -641,7 +641,7 @@ jobs:
               cp "existing-win/$f" windows-runtime/
             done
             # CUDA 运行库 DLL 带版本号需 glob 展开；每个 pattern 至少一个匹配
-            for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
+            for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
               if ! compgen -G "existing-win/$pattern" >/dev/null; then
                 echo "ERROR: existing-win/ 缺 $pattern，无法复用 whisper-cuda。"
                 ls -la existing-win/
@@ -699,7 +699,7 @@ jobs:
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
           done
-          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll" "ggml*.dll"; do
+          for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
             compgen -G "windows-runtime/$pattern" >/dev/null || missing+=("$pattern")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
