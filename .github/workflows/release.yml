@@ -151,7 +151,7 @@ jobs:
             [ -f "$f" ] || missing+=("$f")
           done
           for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
-            compgen -G "$pattern" >/dev/null || missing+=("$pattern")
+            compgen -G "cuda/$pattern" >/dev/null || missing+=("cuda/$pattern")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "ERROR: runtime-windows-x64.zip 内容不完整，缺少必需文件："
@@ -159,6 +159,7 @@ jobs:
             echo ""
             echo "runtime-dist/ 实际内容："
             ls -la
+            ls -la cuda/ 2>/dev/null || true
             echo ""
             echo "请先跑一次 'Build Desktop Runtime' workflow（全量构建，不勾选"
             echo "mesh_worker_only / skip_whisper / skip_llama）产生完整 zip 后再发版。"
@@ -166,6 +167,7 @@ jobs:
           fi
           echo "Runtime manifest OK："
           ls -la
+          ls -la cuda/ 2>/dev/null || true
 
       # Inno Setup 编译安装器
       - name: Build Installer (Inno Setup)
