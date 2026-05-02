@@ -1,4 +1,4 @@
-# 构建桌面端 runtime 二进制
+﻿# 构建桌面端 runtime 二进制
 # 产物：whisper-server + opus-mt-server + madlad-server + llama-server + mesh-worker
 # 平台：Windows x64 (CPU/CUDA/Vulkan) + macOS Universal (Metal/CPU)
 # 源码从 Myjoy 私有仓库 checkout，不泄漏
@@ -310,12 +310,10 @@ jobs:
           name: windows-llama-vulkan
           path: artifacts/
 
-  # ── qwen-translate-server (Qwen 翻译编排层) ──
+  # ── llm-chat-server (LLM Chat 编排层) ──
   # PyInstaller 打包, 与 opus-mt-server / madlad-server 同级部署。
-  # 源文件: ooeoeo/client/platform/qwen-translate-server/
-  # TODO: 源文件 (qwen_translate_server.py, qwen_translate_server.spec, requirements.txt)
-  #       尚未创建。创建后本 job 自动生效。
-  windows-qwen-translate-server:
+  # 源文件: ooeoeo/client/platform/llm-chat-server/
+  windows-llm-chat-server:
     if: github.event.inputs.mesh_worker_only != 'true'
     runs-on: windows-latest
     steps:
@@ -331,26 +329,26 @@ jobs:
       - name: Check source exists
         shell: bash
         run: |
-          DIR="ooeoeo/client/platform/qwen-translate-server"
-          if [ ! -f "$DIR/qwen_translate_server.py" ]; then
-            echo "WARNING: qwen_translate_server.py 尚未创建, 跳过构建。"
+          DIR="ooeoeo/client/platform/llm-chat-server"
+          if [ ! -f "$DIR/llm_chat_server.py" ]; then
+            echo "WARNING: llm_chat_server.py 尚未创建, 跳过构建。"
             echo "        源文件就绪后本 job 自动生效, 无需修改 workflow。"
-            echo "SKIP_QWEN=true" >> $GITHUB_ENV
+            echo "SKIP_LLM_CHAT=true" >> $GITHUB_ENV
           else
-            echo "SKIP_QWEN=false" >> $GITHUB_ENV
+            echo "SKIP_LLM_CHAT=false" >> $GITHUB_ENV
           fi
       - name: Install deps
-        if: env.SKIP_QWEN != 'true'
-        run: pip install -r ooeoeo/client/platform/qwen-translate-server/requirements.txt
+        if: env.SKIP_LLM_CHAT != 'true'
+        run: pip install -r ooeoeo/client/platform/llm-chat-server/requirements.txt
       - name: Build
-        if: env.SKIP_QWEN != 'true'
-        working-directory: ooeoeo/client/platform/qwen-translate-server
-        run: pyinstaller qwen_translate_server.spec --noconfirm
+        if: env.SKIP_LLM_CHAT != 'true'
+        working-directory: ooeoeo/client/platform/llm-chat-server
+        run: pyinstaller llm_chat_server.spec --noconfirm
       - uses: actions/upload-artifact@v4
-        if: env.SKIP_QWEN != 'true'
+        if: env.SKIP_LLM_CHAT != 'true'
         with:
-          name: windows-qwen-translate-server
-          path: ooeoeo/client/platform/qwen-translate-server/dist/qwen-translate-server.exe
+          name: windows-llm-chat-server
+          path: ooeoeo/client/platform/llm-chat-server/dist/llm-chat-server.exe
 
   windows-opus-mt-server:
     if: github.event.inputs.mesh_worker_only != 'true'
@@ -588,7 +586,7 @@ jobs:
           path: artifacts/ggml-silero-v5.1.2.bin
 
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-madlad-server, windows-mesh-worker, windows-llama-cpu, windows-llama-cuda, windows-llama-vulkan, windows-qwen-translate-server, macos-whisper, macos-opus-mt-server, macos-madlad-server, macos-mesh-worker, silero-vad-model]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-opus-mt-server, windows-madlad-server, windows-mesh-worker, windows-llama-cpu, windows-llama-cuda, windows-llama-vulkan, windows-llm-chat-server, macos-whisper, macos-opus-mt-server, macos-madlad-server, macos-mesh-worker, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
@@ -693,12 +691,11 @@ jobs:
             cp all-artifacts/windows-madlad-server/madlad-server.exe windows-runtime/
           fi
 
-          # ─ qwen-translate-server ─
-          # 源文件尚未创建, 构建 job 自动跳过; 此处仅当 artifact 存在才复制。
-          if [ -f "all-artifacts/windows-qwen-translate-server/qwen-translate-server.exe" ]; then
-            cp all-artifacts/windows-qwen-translate-server/qwen-translate-server.exe windows-runtime/
-          elif [ "$MESH_WORKER_ONLY" = "true" ] && [ -f "existing-win/qwen-translate-server.exe" ]; then
-            cp existing-win/qwen-translate-server.exe windows-runtime/
+          # ─ llm-chat-server ─
+          if [ -f "all-artifacts/windows-llm-chat-server/llm-chat-server.exe" ]; then
+            cp all-artifacts/windows-llm-chat-server/llm-chat-server.exe windows-runtime/
+          elif [ "$MESH_WORKER_ONLY" = "true" ] && [ -f "existing-win/llm-chat-server.exe" ]; then
+            cp existing-win/llm-chat-server.exe windows-runtime/
           fi
 
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
@@ -719,7 +716,7 @@ jobs:
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe qwen-translate-server.exe)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe llm-chat-server.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
@@ -824,3 +821,4 @@ jobs:
             --notes "Runtime binaries (whisper-server, opus-mt-server, madlad-server, llama-server, mesh-worker) for desktop engine." \
             release-artifacts/runtime-windows-x64/runtime-windows-x64.zip \
             release-artifacts/runtime-macos-universal/runtime-macos-universal.zip
+
