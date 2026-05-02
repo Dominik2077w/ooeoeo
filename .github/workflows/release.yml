@@ -1,4 +1,4 @@
-# 桌面端发布流水线（在公开仓库 ooeoeo 上运行，避免消耗私有仓库 Actions 额度）
+﻿# 桌面端发布流水线（在公开仓库 ooeoeo 上运行，避免消耗私有仓库 Actions 额度）
 #
 # 源码通过 PAT 从私有仓库 Myjoy checkout，构建完 runner 销毁，不会泄漏源码。
 #
@@ -145,7 +145,7 @@ jobs:
           # 即使上游 Build Desktop Runtime 已经加了 manifest 校验，desktop/runtime
           # tag 上的 zip 也可能是在加校验前产出的（历史污染）。此处再查一遍，
           # 缺文件直接中止发版，避免灌进 installer 推到用户电脑后才发现无法转录。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe qwen-translate-server.exe)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe opus-mt-server.exe madlad-server.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe llm-chat-server.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "$f" ] || missing+=("$f")
@@ -519,3 +519,4 @@ jobs:
           else
             echo "macOS 本次未构建, 跳过 macos 同步"
           fi
+
