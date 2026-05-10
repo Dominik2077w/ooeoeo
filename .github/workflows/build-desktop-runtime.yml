@@ -624,8 +624,6 @@ jobs:
             cp all-artifacts/macos-whisper/* macos-runtime/
             cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
           fi
-          if [ "$MESH_WORKER_ONLY" = "true" ]; then
-          else          fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
           chmod +x macos-runtime/* 2>/dev/null || true
 
