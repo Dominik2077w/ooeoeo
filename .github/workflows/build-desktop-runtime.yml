@@ -555,10 +555,6 @@ jobs:
             cp all-artifacts/windows-llama-vulkan/llama-server-vulkan.exe windows-runtime/
           fi
 
-          # 新构建或复用 (严格, 缺就 fail)
-          if [ "$MESH_WORKER_ONLY" = "true" ]; then
-          else          fi
-
           # ─ llm-chat-server ─
           if [ -f "all-artifacts/windows-llm-chat-server/llm-chat-server.exe" ]; then
             cp all-artifacts/windows-llm-chat-server/llm-chat-server.exe windows-runtime/
