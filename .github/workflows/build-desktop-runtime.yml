@@ -606,14 +606,16 @@ jobs:
             for f in whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe ggml-silero-v5.1.2.bin; do
               cp "existing-win/$f" windows-runtime/
             done
-            # CUDA 运行库 DLL 带版本号需 glob 展开；每个 pattern 至少一个匹配
+            # CUDA 运行库 DLL 带版本号需 glob 展开；每个 pattern 至少一个匹配。
+            # 新构建把 DLL 放在 cuda/ 子目录，existing release 里也是同样结构。
             for pattern in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
-              if ! compgen -G "existing-win/$pattern" >/dev/null; then
-                echo "ERROR: existing-win/ 缺 $pattern，无法复用 whisper-cuda。"
+              if ! compgen -G "existing-win/cuda/$pattern" >/dev/null; then
+                echo "ERROR: existing-win/cuda/ 缺 $pattern，无法复用 whisper-cuda。"
                 ls -la existing-win/
+                ls -la existing-win/cuda/ 2>/dev/null || true
                 exit 1
               fi
-              cp existing-win/$pattern windows-runtime/
+              cp existing-win/cuda/$pattern windows-runtime/
             done
           else
             cp all-artifacts/windows-whisper-cpu/whisper-server-cpu.exe windows-runtime/
