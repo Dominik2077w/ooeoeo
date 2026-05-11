@@ -373,6 +373,42 @@ jobs:
           name: windows-mesh-worker
           path: meshcore/mesh-worker.exe
 
+  windows-ffmpeg-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: cd meshcore && go build -trimpath -ldflags="-s -w" -o ffmpeg-server.exe ./cmd/ffmpeg-server/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-ffmpeg-server
+          path: meshcore/ffmpeg-server.exe
+
+  windows-ffmpeg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download ffmpeg (Windows static build)
+        run: |
+          curl -fsSL -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          unzip -j ffmpeg.zip "*/bin/ffmpeg.exe" -d .
+          ls -la ffmpeg.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-ffmpeg
+          path: ffmpeg.exe
+
   macos-whisper:
     if: github.event.inputs.mesh_worker_only != 'true' && github.event.inputs.skip_whisper != 'true'
     runs-on: macos-14
@@ -434,6 +470,50 @@ jobs:
           name: macos-mesh-worker
           path: meshcore/mesh-worker
 
+  macos-ffmpeg-server:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Myjoy
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MYJOY_REPO }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.MYJOY_PAT }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build Universal
+        run: |
+          cd meshcore
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ffmpeg-server-arm64 ./cmd/ffmpeg-server/
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ffmpeg-server-x86_64 ./cmd/ffmpeg-server/
+          lipo -create ffmpeg-server-arm64 ffmpeg-server-x86_64 -output ffmpeg-server
+          rm ffmpeg-server-arm64 ffmpeg-server-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-ffmpeg-server
+          path: meshcore/ffmpeg-server
+
+  macos-ffmpeg:
+    runs-on: macos-14
+    steps:
+      - name: Download ffmpeg (macOS static build)
+        run: |
+          curl -fsSL -o ffmpeg.zip "https://evermeet.cx/ffmpeg/ffmpeg-7.1.1.zip" 2>/dev/null || true
+          if [ -f ffmpeg.zip ] && [ -s ffmpeg.zip ]; then
+            unzip -o ffmpeg.zip
+          else
+            brew install ffmpeg 2>/dev/null || true
+            cp "$(which ffmpeg)" ./ffmpeg
+          fi
+          chmod +x ffmpeg
+          ls -la ffmpeg
+          file ffmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-ffmpeg
+          path: ffmpeg
+
   # ── Silero VAD 模型 ──
   # whisper.cpp 内置 silero VAD 支持; 模型与 whisper-server 同目录, mesh-worker
   # 启动 whisper-server 时如果发现 ggml-silero-v5.1.2.bin 存在就自动加 --vad 参数。
@@ -462,7 +542,7 @@ jobs:
           path: artifacts/ggml-silero-v5.1.2.bin
 
   package:
-    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-mesh-worker, windows-llama-cpu, windows-llama-cuda, windows-llama-vulkan, windows-llm-chat-server, macos-whisper, macos-mesh-worker, silero-vad-model]
+    needs: [windows-whisper-cpu, windows-whisper-cuda, windows-whisper-vulkan, windows-mesh-worker, windows-ffmpeg-server, windows-ffmpeg, windows-llama-cpu, windows-llama-cuda, windows-llama-vulkan, windows-llm-chat-server, macos-whisper, macos-mesh-worker, macos-ffmpeg-server, macos-ffmpeg, silero-vad-model]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     env:
@@ -564,6 +644,10 @@ jobs:
 
           cp all-artifacts/windows-mesh-worker/mesh-worker.exe windows-runtime/
 
+          # ─ ffmpeg-server + ffmpeg ─
+          cp all-artifacts/windows-ffmpeg-server/ffmpeg-server.exe windows-runtime/
+          cp all-artifacts/windows-ffmpeg/ffmpeg.exe windows-runtime/
+
           # ── 整理 CUDA DLL 到 cuda/ 子目录 ──
           # whisper-server / llama-server 的静态链接版本会通过 ggml 后端自动发现
           # 机制加载同目录的 DLL, 若 CUDA DLL 与 CPU 二进制同目录, 在不支持 CUDA 或
@@ -580,7 +664,7 @@ jobs:
           # ── 产物 manifest 校验 ──
           # zip 前最后一道防线：显式断言所有必需文件到位，缺任何一个就终止
           # workflow，避免坏 zip 覆盖 desktop/runtime tag 上的好产物。
-          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe mesh-worker.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe llm-chat-server.exe)
+          required=(whisper-server-cpu.exe whisper-server-cuda.exe whisper-server-vulkan.exe mesh-worker.exe ffmpeg-server.exe ffmpeg.exe ggml-silero-v5.1.2.bin llama-server-cpu.exe llama-server-cuda.exe llama-server-vulkan.exe llm-chat-server.exe)
           missing=()
           for f in "${required[@]}"; do
             [ -f "windows-runtime/$f" ] || missing+=("$f")
@@ -625,10 +709,12 @@ jobs:
             cp all-artifacts/silero-vad-model/ggml-silero-v5.1.2.bin macos-runtime/
           fi
           cp all-artifacts/macos-mesh-worker/mesh-worker macos-runtime/
+          cp all-artifacts/macos-ffmpeg-server/ffmpeg-server macos-runtime/
+          cp all-artifacts/macos-ffmpeg/ffmpeg macos-runtime/
           chmod +x macos-runtime/* 2>/dev/null || true
 
           # ── 产物 manifest 校验 ──
-          required=(whisper-server mesh-worker ggml-silero-v5.1.2.bin)
+          required=(whisper-server mesh-worker ffmpeg-server ffmpeg ggml-silero-v5.1.2.bin)
           missing=()
           for f in "${required[@]}"; do
             [ -f "macos-runtime/$f" ] || missing+=("$f")
